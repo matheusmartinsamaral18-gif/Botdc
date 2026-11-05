@@ -4,25 +4,6 @@ import os, time
 from collections import defaultdict
 from datetime import timedelta
 
-# ===== KEEP-ALIVE PRA RENDER NÃO DORMIR =====
-from flask import Flask
-from threading import Thread
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot online! 🛡️"
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-# =============================================
-
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -32,6 +13,9 @@ ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
 SOLO_DONO_CHANNEL_ID = 1567716695760703528
 # =====================
+
+# Trava pra não responder 2x a mesma mensagem
+mensagens_processadas = set()
 
 async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
     try:
@@ -89,15 +73,25 @@ async def on_ready():
 msgs = defaultdict(list)
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild: return
+    if message.author.bot or not message.guild:
+        return
 
-    # ===== NOVO: CANAL SÓ O DONO ESCREVE =====
+    # CORREÇÃO: Se essa mensagem já foi processada, ignora
+    if message.id in mensagens_processadas:
+        return
+    mensagens_processadas.add(message.id)
+    # Limpa pra não estourar memória, mantém só as últimas 500
+    if len(mensagens_processadas) > 500:
+        mensagens_processadas.clear()
+        mensagens_processadas.add(message.id)
+
+    # ===== CANAL SÓ O DONO ESCREVE =====
     if message.channel.id == SOLO_DONO_CHANNEL_ID:
         if message.author.id != DONO_ID:
             try: await message.delete()
             except: pass
             return
-        # Se for tu, deixa passar normal
+        # Se for tu, deixa passar e processa 1x no final
         await bot.process_commands(message)
         return
     # =========================================
@@ -108,8 +102,11 @@ async def on_message(message):
         if message.content.startswith("!"):
             await bot.process_commands(message)
         return
+
     if is_protegido(message.author.id):
-        await bot.process_commands(message); return
+        await bot.process_commands(message)
+        return
+
     agora = time.time()
     msgs[message.author.id].append(agora)
     msgs[message.author.id] = [t for t in msgs[message.author.id] if agora - t < 3]
@@ -119,6 +116,8 @@ async def on_message(message):
         except: pass
         await enviar_log(message.guild, "💬 Anti-Spam - Mute", f"**Usuário:** {message.author.mention} (`{message.author.id}`)\n**Canal:** {message.channel.mention}\n**Ação:** Mutado por 10 minutos (5 msgs em 3s)", cor=0xFFA500)
         return
+
+    # CORREÇÃO: Único process_commands do fluxo normal
     await bot.process_commands(message)
 
 @bot.event
@@ -252,5 +251,4 @@ async def protecoes(ctx):
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
-keep_alive()
 bot.run(os.getenv("TOKEN"))
