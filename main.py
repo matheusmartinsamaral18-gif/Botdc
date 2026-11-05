@@ -30,6 +30,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 DONO_ID = 926223827590078504
 ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
+SOLO_DONO_CHANNEL_ID = 1567716695760703528
 # =====================
 
 async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
@@ -89,6 +90,18 @@ msgs = defaultdict(list)
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
+
+    # ===== NOVO: CANAL SÓ O DONO ESCREVE =====
+    if message.channel.id == SOLO_DONO_CHANNEL_ID:
+        if message.author.id != DONO_ID:
+            try: await message.delete()
+            except: pass
+            return
+        # Se for tu, deixa passar normal
+        await bot.process_commands(message)
+        return
+    # =========================================
+
     if message.channel.id == LOGS_CHANNEL_ID:
         try: await message.delete()
         except: pass
