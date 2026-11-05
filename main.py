@@ -4,11 +4,29 @@ import os, time
 from collections import defaultdict
 from datetime import timedelta
 
+# ===== KEEP-ALIVE PRA RENDER NÃO DORMIR =====
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot online! 🛡️"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+# =============================================
+
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== CONFIGURA =====
-DONO_ID = 926223827590078504
+DONO_ID = 92622382759007850
 ADM_CONFIANCA = [] # IDs que NUNCA serão punidos
 # =====================
 
@@ -101,7 +119,6 @@ async def on_guild_channel_delete(channel):
     ex = await pegar_executor(channel.guild, discord.AuditLogAction.channel_delete)
 
     # ===== BACKUP: RECRIA O CANAL =====
-    # Se foi o dono ou ADM de confiança que apagou, NÃO recria
     if ex and not is_protegido(ex) and ex != bot.user.id:
         try:
             guild = channel.guild
@@ -144,7 +161,6 @@ async def on_guild_channel_delete(channel):
         except Exception as e:
             print(f"Erro backup canal: {e}")
 
-    # ===== PUNIÇÃO =====
     if ex and registrou("canal_del", ex, 2, 3):
         await punir(channel.guild, ex, "Deletou 2 canais em 3s")
 
@@ -240,4 +256,5 @@ async def destravar(ctx):
 async def protecoes(ctx):
     await ctx.send("🛡️ **ANTI-NUKE + BACKUP 3s:**\n1 Anti-Spam\n2 Anti-@everyone\n3 Anti-Mass Ban (2 em 3s)\n4 Anti-Mass Kick (2 em 3s)\n5 Anti-Criar/Deletar Canal + Backup\n6 Anti-Criar/Deletar Cargo + Backup\n7 Anti-Dar ADM (ban na hora)\n8 Anti-Webhook (ban na hora)\n9 Anti-Deletar Emoji/Sticker\n10 Anti-Apagar Mensagens\n11 Anti-Mudar Nome do Server")
 
+keep_alive()
 bot.run(os.getenv("TOKEN"))
