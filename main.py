@@ -15,7 +15,8 @@ def home():
     return "Bot online! 🛡️"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -26,8 +27,8 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== CONFIGURA =====
-DONO_ID = 92622382759007850
-ADM_CONFIANCA = [] # IDs que NUNCA serão punidos
+DONO_ID = 926223827590078504
+ADM_CONFIANCA = []
 # =====================
 
 def is_protegido(user_id):
@@ -69,21 +70,18 @@ async def on_ready():
     print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP 3s")
     await bot.change_presence(activity=discord.Game(name="🛡️ Anti-Nuke + Backup"))
 
-# ===== ANTI-SPAM + ANTI-EVERYONE =====
 msgs = defaultdict(list)
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
     if is_protegido(message.author.id):
         await bot.process_commands(message); return
-
     if "@everyone" in message.content or "@here" in message.content:
         if not message.author.guild_permissions.administrator:
             try: await message.delete()
             except: pass
             await message.channel.send(f"{message.author.mention} ⚠️ Só ADM pode usar @everyone!", delete_after=3)
             return
-
     agora = time.time()
     msgs[message.author.id].append(agora)
     msgs[message.author.id] = [t for t in msgs[message.author.id] if agora - t < 3]
@@ -93,8 +91,6 @@ async def on_message(message):
         except: pass
         return
     await bot.process_commands(message)
-
-# ===== BACKUP + ANTI-NUKE =====
 
 @bot.event
 async def on_member_ban(guild, user):
@@ -117,50 +113,22 @@ async def on_guild_channel_create(channel):
 @bot.event
 async def on_guild_channel_delete(channel):
     ex = await pegar_executor(channel.guild, discord.AuditLogAction.channel_delete)
-
-    # ===== BACKUP: RECRIA O CANAL =====
     if ex and not is_protegido(ex) and ex != bot.user.id:
         try:
             guild = channel.guild
             categoria = channel.category
             overwrites = channel.overwrites
-
             if isinstance(channel, discord.TextChannel):
-                novo = await guild.create_text_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    topic=channel.topic,
-                    slowmode_delay=channel.slowmode_delay,
-                    nsfw=channel.nsfw,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke: canal restaurado"
-                )
+                novo = await guild.create_text_channel(name=channel.name, category=categoria, position=channel.position, topic=channel.topic, slowmode_delay=channel.slowmode_delay, nsfw=channel.nsfw, overwrites=overwrites, reason="BACKUP Anti-Nuke")
             elif isinstance(channel, discord.VoiceChannel):
-                novo = await guild.create_voice_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    bitrate=channel.bitrate,
-                    user_limit=channel.user_limit,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke: canal restaurado"
-                )
+                novo = await guild.create_voice_channel(name=channel.name, category=categoria, position=channel.position, bitrate=channel.bitrate, user_limit=channel.user_limit, overwrites=overwrites, reason="BACKUP Anti-Nuke")
             elif isinstance(channel, discord.CategoryChannel):
-                novo = await guild.create_category(
-                    name=channel.name,
-                    position=channel.position,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke: categoria restaurada"
-                )
+                novo = await guild.create_category(name=channel.name, position=channel.position, overwrites=overwrites, reason="BACKUP Anti-Nuke")
             else:
                 novo = None
-
-            if novo:
-                print(f"♻️ BACKUP: Canal #{channel.name} recriado!")
+            if novo: print(f"♻️ BACKUP: Canal #{channel.name} recriado!")
         except Exception as e:
             print(f"Erro backup canal: {e}")
-
     if ex and registrou("canal_del", ex, 2, 3):
         await punir(channel.guild, ex, "Deletou 2 canais em 3s")
 
@@ -180,22 +148,12 @@ async def on_guild_role_create(role):
 @bot.event
 async def on_guild_role_delete(role):
     ex = await pegar_executor(role.guild, discord.AuditLogAction.role_delete)
-
-    # ===== BACKUP: RECRIA O CARGO =====
     if ex and not is_protegido(ex) and ex != bot.user.id and role.name != "@everyone":
         try:
-            await role.guild.create_role(
-                name=role.name,
-                colour=role.colour,
-                hoist=role.hoist,
-                mentionable=role.mentionable,
-                permissions=role.permissions,
-                reason="BACKUP Anti-Nuke: cargo restaurado"
-            )
+            await role.guild.create_role(name=role.name, colour=role.colour, hoist=role.hoist, mentionable=role.mentionable, permissions=role.permissions, reason="BACKUP Anti-Nuke")
             print(f"♻️ BACKUP: Cargo {role.name} recriado!")
         except Exception as e:
             print(f"Erro backup cargo: {e}")
-
     if ex and registrou("cargo_del", ex, 2, 3):
         await punir(role.guild, ex, "Deletou 2 cargos em 3s")
 
