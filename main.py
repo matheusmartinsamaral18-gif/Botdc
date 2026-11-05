@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os, time, json, asyncio
 from collections import defaultdict
 from datetime import timedelta
@@ -11,13 +11,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
 SOLO_DONO_CHANNEL_ID = 1567716695760703528
-# DONO removido - agora pega automaticamente do servidor
 # =====================
 
 def get_dono_id(guild):
     if guild is None:
         return None
-    # guild.owner_id já vem do Discord, sem precisar de ID fixo
     if guild.owner_id:
         return guild.owner_id
     if guild.owner:
@@ -29,24 +27,57 @@ def is_protegido(guild, user_id):
         return True
     return user_id in ADM_CONFIANCA
 
-# ===== 12. BACKUP POR SERVIDOR - ARQUIVO SEPARADO AUTOMATICO =====
-def backup_path(guild_id):
-    return f"backup_{guild_id}.json"
+# ===== BACKUP DUPLO: BOM (travado) + TEMP (rascunho) =====
+def backup_bom_path(guild_id):
+    return f"backup_bom_{guild_id}.json"
 
-def carregar_backup(guild_id):
+def backup_temp_path(guild_id):
+    return f"backup_temp_{guild_id}.json"
+
+def backup_path(guild_id):
+    # compatibilidade com backup antigo
+    return backup_bom_path(guild_id)
+
+def _carregar_arquivo(path):
     try:
-        if os.path.exists(backup_path(guild_id)):
-            with open(backup_path(guild_id), "r", encoding="utf-8") as f:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
     except: pass
     return {"canais": [], "cargos": []}
 
-def salvar_backup(guild_id, dados):
+def _salvar_arquivo(path, dados):
     try:
-        with open(backup_path(guild_id), "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(dados, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"Erro salvar backup {guild_id}: {e}")
+        print(f"Erro salvar {path}: {e}")
+
+def carregar_backup(guild_id):
+    # SEMPRE retorna o BOM - é ele que usa pra restaurar
+    dados = _carregar_arquivo(backup_bom_path(guild_id))
+    # Migração: se não tem BOM mas tem backup antigo, usa ele
+    if not dados["canais"] and not dados["cargos"]:
+        antigo = f"backup_{guild_id}.json"
+        if os.path.exists(antigo):
+            dados = _carregar_arquivo(antigo)
+            if dados["canais"] or dados["cargos"]:
+                _salvar_arquivo(backup_bom_path(guild_id), dados)
+                _salvar_arquivo(backup_temp_path(guild_id), dados)
+    return dados
+
+def carregar_backup_temp(guild_id):
+    return _carregar_arquivo(backup_temp_path(guild_id))
+
+def salvar_backup(guild_id, dados):
+    # salvar_backup agora = salva no BOM (usado só em casos seguros)
+    _salvar_arquivo(backup_bom_path(guild_id), dados)
+
+def salvar_backup_temp(guild_id, dados):
+    _salvar_arquivo(backup_temp_path(guild_id), dados)
+
+def salvar_backup_bom(guild_id, dados):
+    _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 def snapshot_canal(ch):
     return {
@@ -58,7 +89,6 @@ def snapshot_canal(ch):
         "nsfw": getattr(ch, "nsfw", False),
         "bitrate": getattr(ch, "bitrate", None),
         "user_limit": getattr(ch, "user_limit", None),
-        # CORRIGIDO: Role não tem .type, usa is_role
         "overwrites": [{"id": k.id, "is_role": isinstance(k, discord.Role), "allow": v.pair()[0].value, "deny": v.pair()[1].value} for k, v in ch.overwrites.items()]
     }
 
@@ -88,7 +118,35 @@ def get_raid(guild_id):
         raid_state[guild_id] = {"ativo": False, "raider_id": None, "raider_nome": "Desconhecido", "canais_apagados_ids": set(), "cargos_apagados": [], "timer": None, "ultimo_ataque": 0, "canais_raid_criados": set(), "qtd_ataques": 0}
     return raid_state[guild_id]
 
-# ===== LOG UNICO - 10. SÓ 1 LOG NO FINAL =====
+def teve_raid_recente(guild_id, minutos=30):
+    st = get_raid(guild_id)
+    if st["ativo"]:
+        return True
+    if st["ultimo_ataque"] == 0:
+        return False
+    return (time.time() - st["ultimo_ataque"]) < (minutos * 60)
+
+# ===== SYNC AUTOMATICO 30 MIN - TEMP -> BOM se estiver tranquilo =====
+@tasks.loop(minutes=30)
+async def sync_backup_loop():
+    for guild in bot.guilds:
+        try:
+            if teve_raid_recente(guild.id, 30):
+                print(f"⏸️ Sync pulado {guild.name}: teve raid recente, BOM mantido travado")
+                continue
+            # Sem raid: TEMP é confiável, joga pro BOM
+            foto_atual = tirar_foto_guild(guild)
+            salvar_backup_temp(guild.id, foto_atual)
+            salvar_backup_bom(guild.id, foto_atual)
+            print(f"🔄 Backup BOM atualizado (30min): {guild.name}")
+        except Exception as e:
+            print(f"Erro sync backup {guild.name}: {e}")
+
+@sync_backup_loop.before_loop
+async def antes_sync():
+    await bot.wait_until_ready()
+
+# ===== LOG UNICO =====
 async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
     try:
         canal = guild.get_channel(LOGS_CHANNEL_ID)
@@ -120,7 +178,7 @@ def registrou(tipo, user_id, limite=2, janela=3):
     acoes[chave] = [t for t in acoes[chave] if agora - t < janela]
     return len(acoes[chave]) >= limite
 
-# ===== 1. BAN PRIMEIRO - RAPIDO, SEM ESPERAR =====
+# ===== 1. BAN PRIMEIRO =====
 async def punir(guild, executor_id, motivo):
     if is_protegido(guild, executor_id):
         return False
@@ -168,7 +226,7 @@ async def pegar_executor(guild, action):
     except: pass
     return None
 
-# ===== 4 + 5 + 6 + 7. ESPERAR PARAR E RESTAURAR =====
+# ===== RECUPERAÇÃO =====
 def agendar_recuperacao(guild):
     st = get_raid(guild.id)
     if st["timer"] and not st["timer"].done():
@@ -186,11 +244,14 @@ async def restaurar_tudo(guild):
     if not st["ativo"]:
         return
     print(f"♻️ Começando restauração em {guild.name}...")
+    # USA SEMPRE O BOM, nunca o TEMP sujo
     backup = carregar_backup(guild.id)
     canais_restaurados = 0
     canais_raid_apagados = 0
+    canais_renomeados = 0
     cargos_restaurados = 0
 
+    # 1. Apaga canais que NÃO estão no BOM (canais do raid) - por ID
     ids_backup = {c["id"] for c in backup["canais"]}
     for ch in list(guild.channels):
         if ch.id not in ids_backup and ch.id not in st["canais_apagados_ids"]:
@@ -202,6 +263,38 @@ async def restaurar_tudo(guild):
                 await asyncio.sleep(0.3)
             except: pass
 
+    # 2. Corrige nome / posição de canais que existem mas foram renomeados
+    mapa_backup = {c["id"]: c for c in backup["canais"]}
+    for ch in list(guild.channels):
+        if ch.id in mapa_backup:
+            cdata = mapa_backup[ch.id]
+            try:
+                precisa = False
+                kwargs = {}
+                if ch.name != cdata["name"]:
+                    kwargs["name"] = cdata["name"]
+                    precisa = True
+                if ch.position != cdata["position"]:
+                    kwargs["position"] = cdata["position"]
+                    precisa = True
+                if isinstance(ch, discord.TextChannel):
+                    if ch.topic != cdata["topic"]:
+                        kwargs["topic"] = cdata["topic"]
+                        precisa = True
+                    if ch.slowmode_delay != cdata["slowmode"]:
+                        kwargs["slowmode_delay"] = cdata["slowmode"]
+                        precisa = True
+                    if ch.nsfw != cdata["nsfw"]:
+                        kwargs["nsfw"] = cdata["nsfw"]
+                        precisa = True
+                if precisa:
+                    await ch.edit(reason="Anti-Nuke: Restaurando nome/config", **kwargs)
+                    canais_renomeados += 1
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"Erro corrigir canal {ch.name}: {e}")
+
+    # 3. Recria canais apagados - ordenado por posição, suporta 50 com mesmo nome por ID
     canais_atuais_ids = {c.id for c in guild.channels}
     for cdata in sorted(backup["canais"], key=lambda x: x["position"]):
         if cdata["id"] not in canais_atuais_ids:
@@ -209,7 +302,6 @@ async def restaurar_tudo(guild):
                 categoria = guild.get_channel(cdata["category_id"]) if cdata["category_id"] else None
                 overwrites = {}
                 for ow in cdata["overwrites"]:
-                    # CORRIGIDO: usa is_role, com fallback pra backup antigo
                     if "is_role" in ow:
                         alvo = guild.get_role(ow["id"]) if ow["is_role"] else guild.get_member(ow["id"])
                     else:
@@ -240,35 +332,48 @@ async def restaurar_tudo(guild):
     try:
         canal = guild.get_channel(LOGS_CHANNEL_ID)
         if canal:
-            embed = discord.Embed(title="🛡️ Raid finalizado", description=f"**Raider:** {st['raider_nome']} (`{st['raider_id']}`)\n**Canais do raid apagados:** {canais_raid_apagados}\n**Canais restaurados:** {canais_restaurados}\n**Cargos restaurados:** {cargos_restaurados}\n**Tempo de espera:** 15s", color=0x2ecc71, timestamp=discord.utils.utcnow())
+            embed = discord.Embed(title="🛡️ Raid finalizado", description=f"**Raider:** {st['raider_nome']} (`{st['raider_id']}`)\n**Canais do raid apagados:** {canais_raid_apagados}\n**Canais restaurados:** {canais_restaurados}\n**Canais renomeados corrigidos:** {canais_renomeados}\n**Cargos restaurados:** {cargos_restaurados}\n**Tempo de espera:** 15s", color=0x2ecc71, timestamp=discord.utils.utcnow())
             embed.set_footer(text=f"Servidor: {guild.name}")
             await canal.send(embed=embed)
     except: pass
 
-    raid_state[guild.id] = {"ativo": False, "raider_id": None, "raider_nome": "Desconhecido", "canais_apagados_ids": set(), "cargos_apagados": [], "timer": None, "ultimo_ataque": 0, "canais_raid_criados": set(), "qtd_ataques": 0}
+    raid_state[guild.id] = {"ativo": False, "raider_id": None, "raider_nome": "Desconhecido", "canais_apagados_ids": set(), "cargos_apagados": [], "timer": None, "ultimo_ataque": time.time(), "canais_raid_criados": set(), "qtd_ataques": 0}
+    # IMPORTANTE: TEMP sujo é jogado fora e refeito limpo a partir do servidor restaurado
     try:
-        salvar_backup(guild.id, tirar_foto_guild(guild))
+        foto_limpa = tirar_foto_guild(guild)
+        salvar_backup_temp(guild.id, foto_limpa)
+        # NÃO atualiza o BOM aqui, ele fica travado até passar 30min sem raid
     except: pass
     print(f"✅ Restauração finalizada em {guild.name}")
 
 @bot.event
 async def on_ready():
-    print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP 3s")
+    print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO 30min")
     await bot.change_presence(activity=discord.Game(name="🛡️ SYSTEM PROTECTING"))
     for guild in bot.guilds:
         try:
-            if not os.path.exists(backup_path(guild.id)):
-                salvar_backup(guild.id, tirar_foto_guild(guild))
-                print(f"📸 Backup inicial criado: backup_{guild.id}.json - {guild.name}")
+            # Só cria BOM se ainda NÃO existir. Se já existir, NÃO sobrescreve (pode ter entrado no meio de raid)
+            if not os.path.exists(backup_bom_path(guild.id)):
+                foto = tirar_foto_guild(guild)
+                salvar_backup_bom(guild.id, foto)
+                salvar_backup_temp(guild.id, foto)
+                print(f"📸 Backup inicial criado: {guild.name}")
             else:
-                print(f"📂 Backup carregado: {guild.name}")
+                # Garante que TEMP existe
+                if not os.path.exists(backup_temp_path(guild.id)):
+                    salvar_backup_temp(guild.id, tirar_foto_guild(guild))
+                print(f"📂 Backup BOM carregado: {guild.name}")
         except Exception as e:
             print(f"Erro backup inicial {guild.name}: {e}")
+    if not sync_backup_loop.is_running():
+        sync_backup_loop.start()
 
 @bot.event
 async def on_guild_join(guild):
     try:
-        salvar_backup(guild.id, tirar_foto_guild(guild))
+        foto = tirar_foto_guild(guild)
+        salvar_backup_bom(guild.id, foto)
+        salvar_backup_temp(guild.id, foto)
         print(f"📸 Novo servidor, backup criado: {guild.name}")
     except: pass
 
@@ -335,11 +440,12 @@ async def on_guild_channel_create(channel):
         st["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
         return
+    # Sem raid: atualiza só TEMP, não BOM
     try:
-        dados = carregar_backup(guild.id)
+        dados = carregar_backup_temp(guild.id)
         if not any(c["id"] == channel.id for c in dados["canais"]):
             dados["canais"].append(snapshot_canal(channel))
-            salvar_backup(guild.id, dados)
+            salvar_backup_temp(guild.id, dados)
     except: pass
     ex = await pegar_executor(guild, discord.AuditLogAction.channel_create)
     if ex and registrou("canal_criar", ex, 2, 3):
@@ -359,10 +465,11 @@ async def on_guild_channel_delete(channel):
         return
 
     ex = await pegar_executor(guild, discord.AuditLogAction.channel_delete)
+    # Sem raid: remove só do TEMP
     try:
-        dados = carregar_backup(guild.id)
+        dados = carregar_backup_temp(guild.id)
         dados["canais"] = [c for c in dados["canais"] if c["id"] != channel.id]
-        salvar_backup(guild.id, dados)
+        salvar_backup_temp(guild.id, dados)
     except: pass
 
     if ex and not is_protegido(guild, ex) and ex != bot.user.id:
@@ -387,21 +494,28 @@ async def on_guild_channel_delete(channel):
 
 @bot.event
 async def on_guild_channel_update(antes, depois):
-    if antes.name != depois.name:
-        ex = await pegar_executor(depois.guild, discord.AuditLogAction.channel_update)
-        if ex and registrou("canal_rename", ex, 2, 3):
-            await punir(depois.guild, ex, "Renomeou 2 canais em 3s")
-    else:
-        st = get_raid(depois.guild.id)
-        if not st["ativo"]:
-            try:
-                dados = carregar_backup(depois.guild.id)
-                for i, c in enumerate(dados["canais"]):
-                    if c["id"] == depois.id:
-                        dados["canais"][i] = snapshot_canal(depois)
-                        break
-                salvar_backup(depois.guild.id, dados)
-            except: pass
+    st = get_raid(depois.guild.id)
+    if st["ativo"]:
+        st["ultimo_ataque"] = time.time()
+        agendar_recuperacao(depois.guild)
+        return
+    # CORRIGIDO: agora salva rename também, no TEMP
+    if antes.name != depois.name or antes.position != depois.position or getattr(antes, "topic", None) != getattr(depois, "topic", None):
+        try:
+            dados = carregar_backup_temp(depois.guild.id)
+            achou = False
+            for i, c in enumerate(dados["canais"]):
+                if c["id"] == depois.id:
+                    dados["canais"][i] = snapshot_canal(depois)
+                    achou = True
+                    break
+            if not achou:
+                dados["canais"].append(snapshot_canal(depois))
+            salvar_backup_temp(depois.guild.id, dados)
+        except: pass
+    ex = await pegar_executor(depois.guild, discord.AuditLogAction.channel_update)
+    if ex and registrou("canal_rename", ex, 2, 3):
+        await punir(depois.guild, ex, "Renomeou 2 canais em 3s")
 
 @bot.event
 async def on_guild_role_create(role):
@@ -411,10 +525,10 @@ async def on_guild_role_create(role):
         agendar_recuperacao(role.guild)
         return
     try:
-        dados = carregar_backup(role.guild.id)
+        dados = carregar_backup_temp(role.guild.id)
         if not any(r["id"] == role.id for r in dados["cargos"]):
             dados["cargos"].append(snapshot_cargo(role))
-            salvar_backup(role.guild.id, dados)
+            salvar_backup_temp(role.guild.id, dados)
     except: pass
     ex = await pegar_executor(role.guild, discord.AuditLogAction.role_create)
     if ex and registrou("cargo_criar", ex, 2, 3):
@@ -429,9 +543,9 @@ async def on_guild_role_delete(role):
         return
     ex = await pegar_executor(role.guild, discord.AuditLogAction.role_delete)
     try:
-        dados = carregar_backup(role.guild.id)
+        dados = carregar_backup_temp(role.guild.id)
         dados["cargos"] = [r for r in dados["cargos"] if r["id"] != role.id]
-        salvar_backup(role.guild.id, dados)
+        salvar_backup_temp(role.guild.id, dados)
     except: pass
     if ex and not is_protegido(role.guild, ex) and ex != bot.user.id and role.name != "@everyone":
         try:
@@ -502,12 +616,33 @@ async def protecoes(ctx):
     embed.add_field(name="♻️ Backup Automático", value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados", inline=False)
     embed.add_field(name="🛠️ Anti-Raid / Moderação", value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa", inline=False)
     embed.add_field(name="🎨 Anti-Vandalismo", value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa", inline=False)
-    # REMOVIDO: !limpar não aparece mais aqui, só dono sabe
     embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel", inline=False)
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
-# 11. COMANDO LIMPAR - SÓ DONO DO SERVIDOR (automatico)
+# NOVO: !atualizar backup - SÓ DONO, força BOM agora sem esperar 30min
+@bot.command(name="atualizar")
+async def atualizar_backup(ctx, *, arg: str = ""):
+    if ctx.author.id != get_dono_id(ctx.guild):
+        try: await ctx.message.delete()
+        except: pass
+        return
+    if arg.strip().lower() != "backup":
+        await ctx.send("Usa assim: `!atualizar backup`", delete_after=5)
+        return
+    st = get_raid(ctx.guild.id)
+    if st["ativo"]:
+        await ctx.send("⚠️ Tá em raid agora, não vou atualizar o backup bom pra não salvar arquivo errado. Espera acabar o raid.", delete_after=8)
+        return
+    try:
+        foto = tirar_foto_guild(ctx.guild)
+        salvar_backup_bom(ctx.guild.id, foto)
+        salvar_backup_temp(ctx.guild.id, foto)
+        await ctx.send(f"✅ Backup BOM atualizado na hora! **{len(foto['canais'])} canais** e **{len(foto['cargos'])} cargos** salvos.", delete_after=8)
+        print(f"✅ Backup BOM forçado pelo dono em {ctx.guild.name}")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao atualizar backup: {e}", delete_after=8)
+
 @bot.command(name="limpar")
 async def limpar(ctx, quantidade: int = 0):
     if ctx.author.id != get_dono_id(ctx.guild):
