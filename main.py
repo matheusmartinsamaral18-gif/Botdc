@@ -27,7 +27,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== CONFIGURA =====
-DONO_ID = 926223827590078504
+DONO_ID = 92622382759007850
 ADM_CONFIANCA = []
 # =====================
 
