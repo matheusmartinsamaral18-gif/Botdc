@@ -76,12 +76,8 @@ async def on_message(message):
     if message.author.bot or not message.guild: return
     if is_protegido(message.author.id):
         await bot.process_commands(message); return
-    if "@everyone" in message.content or "@here" in message.content:
-        if not message.author.guild_permissions.administrator:
-            try: await message.delete()
-            except: pass
-            await message.channel.send(f"{message.author.mention} ⚠️ Só ADM pode usar @everyone!", delete_after=3)
-            return
+
+    # Anti-Spam só - Anti-@everyone removido
     agora = time.time()
     msgs[message.author.id].append(agora)
     msgs[message.author.id] = [t for t in msgs[message.author.id] if agora - t < 3]
@@ -241,7 +237,7 @@ async def protecoes(ctx):
     )
     embed.add_field(
         name="🛠️ Anti-Raid / Moderação",
-        value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 📢 Anti-@everyone / @here sem permissão\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa",
+        value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa",
         inline=False
     )
     embed.add_field(
