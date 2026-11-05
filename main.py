@@ -8,11 +8,26 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== CONFIGURA - NÃO MEXI =====
-DONO_ID = 926223827590078504
 ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
 SOLO_DONO_CHANNEL_ID = 1567716695760703528
+# DONO removido - agora pega automaticamente do servidor
 # =====================
+
+def get_dono_id(guild):
+    if guild is None:
+        return None
+    # guild.owner_id já vem do Discord, sem precisar de ID fixo
+    if guild.owner_id:
+        return guild.owner_id
+    if guild.owner:
+        return guild.owner.id
+    return None
+
+def is_protegido(guild, user_id):
+    if guild is not None and user_id == get_dono_id(guild):
+        return True
+    return user_id in ADM_CONFIANCA
 
 # ===== 12. BACKUP POR SERVIDOR - ARQUIVO SEPARADO AUTOMATICO =====
 def backup_path(guild_id):
@@ -43,7 +58,8 @@ def snapshot_canal(ch):
         "nsfw": getattr(ch, "nsfw", False),
         "bitrate": getattr(ch, "bitrate", None),
         "user_limit": getattr(ch, "user_limit", None),
-        "overwrites": [{"id": k.id, "type": str(k.type), "allow": v.pair()[0].value, "deny": v.pair()[1].value} for k, v in ch.overwrites.items()]
+        # CORRIGIDO: Role não tem .type, usa is_role
+        "overwrites": [{"id": k.id, "is_role": isinstance(k, discord.Role), "allow": v.pair()[0].value, "deny": v.pair()[1].value} for k, v in ch.overwrites.items()]
     }
 
 def snapshot_cargo(r):
@@ -63,9 +79,8 @@ def tirar_foto_guild(guild):
     return dados
 
 # ===== ESTADO DO RAID POR SERVIDOR =====
-# 2. MODO RAID + CONGELAR BACKUP
-raid_state = {} # guild_id -> {ativo: bool, raider_id, raider_nome, canais_apagados: set, cargos_apagados: set, timer_task, ultimo_ataque}
-ja_banidos = set() # 3. Não tentar banir 2x
+raid_state = {}
+ja_banidos = set()
 mensagens_processadas = set()
 
 def get_raid(guild_id):
@@ -75,7 +90,6 @@ def get_raid(guild_id):
 
 # ===== LOG UNICO - 10. SÓ 1 LOG NO FINAL =====
 async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
-    # Log de coisas normais continua igual, sem spam
     try:
         canal = guild.get_channel(LOGS_CHANNEL_ID)
         if canal is None:
@@ -86,18 +100,16 @@ async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
             await canal.send(embed=embed)
     except Exception as e:
         print(f"Erro log canal: {e}")
-    # NÃO manda DM no raid pra não spamar, só em caso normal
     if "Raid finalizado" not in titulo and "Banido" not in titulo:
         try:
-            dono = await bot.fetch_user(DONO_ID)
-            await dono.send(f"{titulo}\n{descricao}")
+            dono_id = get_dono_id(guild)
+            if dono_id:
+                dono = await bot.fetch_user(dono_id)
+                await dono.send(f"{titulo}\n{descricao}")
         except: pass
 
 async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
     await enviar_log_simples(guild, titulo, descricao, cor)
-
-def is_protegido(user_id):
-    return user_id == DONO_ID or user_id in ADM_CONFIANCA
 
 acoes = defaultdict(list)
 
@@ -110,9 +122,8 @@ def registrou(tipo, user_id, limite=2, janela=3):
 
 # ===== 1. BAN PRIMEIRO - RAPIDO, SEM ESPERAR =====
 async def punir(guild, executor_id, motivo):
-    if is_protegido(executor_id):
+    if is_protegido(guild, executor_id):
         return False
-    # 3. Já banido? Não tenta de novo, não spama Unknown Member
     if executor_id in ja_banidos:
         return False
     ja_banidos.add(executor_id)
@@ -121,14 +132,12 @@ async def punir(guild, executor_id, motivo):
         nome = str(membro)
     except:
         nome = f"ID {executor_id}"
-        # Se já saiu do servidor, tenta ban por ID direto sem fetch
         try:
             user = await bot.fetch_user(executor_id)
             await guild.ban(user, reason=f"ANTI-NUKE: {motivo}")
             print(f"🚨 Ban por ID: {nome} - {motivo}")
             return True
         except Exception as e:
-            # Se der Unknown Member / Not Found, é pq já foi banido, ignora silencioso
             if "Unknown" in str(e) or "404" in str(e) or "10007" in str(e):
                 return False
             print(f"Erro punir (ignorado): {e}")
@@ -136,18 +145,15 @@ async def punir(guild, executor_id, motivo):
     try:
         await guild.ban(membro, reason=f"ANTI-NUKE: {motivo}")
         print(f"🚨 Banido rápido: {nome} - {motivo}")
-        # Entra em MODO RAID
         st = get_raid(guild.id)
         st["ativo"] = True
         st["raider_id"] = executor_id
         st["raider_nome"] = nome
         st["ultimo_ataque"] = time.time()
         st["qtd_ataques"] += 1
-        # 4. Agenda recuperação em 15s, se tiver outro ataque reseta o timer
         agendar_recuperacao(guild)
         return True
     except Exception as e:
-        # 3. Silencia erro de já banido
         if "Unknown" in str(e) or "404" in str(e) or "10007" in str(e) or "Missing Permissions" in str(e):
             return False
         print(f"Erro punir: {e}")
@@ -165,12 +171,11 @@ async def pegar_executor(guild, action):
 # ===== 4 + 5 + 6 + 7. ESPERAR PARAR E RESTAURAR =====
 def agendar_recuperacao(guild):
     st = get_raid(guild.id)
-    # Cancela timer antigo e cria novo de 15s
     if st["timer"] and not st["timer"].done():
         st["timer"].cancel()
     async def esperar_e_restaurar():
         try:
-            await asyncio.sleep(15) # Espera 15s sem ataque
+            await asyncio.sleep(15)
             await restaurar_tudo(guild)
         except asyncio.CancelledError:
             pass
@@ -182,17 +187,13 @@ async def restaurar_tudo(guild):
         return
     print(f"♻️ Começando restauração em {guild.name}...")
     backup = carregar_backup(guild.id)
-    canais_apagados_qtd = 0
     canais_restaurados = 0
     canais_raid_apagados = 0
     cargos_restaurados = 0
 
-    # 5. Apaga canais do raid primeiro
     ids_backup = {c["id"] for c in backup["canais"]}
     for ch in list(guild.channels):
-        # Se não tava no backup e não é canal do bot / sistema, é do raid
         if ch.id not in ids_backup and ch.id not in st["canais_apagados_ids"]:
-            # Não apaga canal de log e solo dono
             if ch.id in [LOGS_CHANNEL_ID, SOLO_DONO_CHANNEL_ID]:
                 continue
             try:
@@ -201,17 +202,18 @@ async def restaurar_tudo(guild):
                 await asyncio.sleep(0.3)
             except: pass
 
-    # 6. Recria canais que sumiram
     canais_atuais_ids = {c.id for c in guild.channels}
-    # Também considera canais que foram apagados e estavam no backup
     for cdata in sorted(backup["canais"], key=lambda x: x["position"]):
         if cdata["id"] not in canais_atuais_ids:
             try:
                 categoria = guild.get_channel(cdata["category_id"]) if cdata["category_id"] else None
-                # Recria overwrites
                 overwrites = {}
                 for ow in cdata["overwrites"]:
-                    alvo = guild.get_role(ow["id"]) or guild.get_member(ow["id"])
+                    # CORRIGIDO: usa is_role, com fallback pra backup antigo
+                    if "is_role" in ow:
+                        alvo = guild.get_role(ow["id"]) if ow["is_role"] else guild.get_member(ow["id"])
+                    else:
+                        alvo = guild.get_role(ow["id"]) or guild.get_member(ow["id"])
                     if alvo:
                         overwrites[alvo] = discord.PermissionOverwrite.from_pair(discord.Permissions(ow["allow"]), discord.Permissions(ow["deny"]))
                 tipo = cdata["type"]
@@ -226,7 +228,6 @@ async def restaurar_tudo(guild):
             except Exception as e:
                 print(f"Erro restaurar canal {cdata['name']}: {e}")
 
-    # 7. Recria cargos que sumiram
     cargos_atuais = {r.name for r in guild.roles}
     for rdata in backup["cargos"]:
         if rdata["name"] not in cargos_atuais:
@@ -236,7 +237,6 @@ async def restaurar_tudo(guild):
                 await asyncio.sleep(0.3)
             except: pass
 
-    # 10. LOG ÚNICA FINAL
     try:
         canal = guild.get_channel(LOGS_CHANNEL_ID)
         if canal:
@@ -245,9 +245,7 @@ async def restaurar_tudo(guild):
             await canal.send(embed=embed)
     except: pass
 
-    # Limpa estado e descongela backup
     raid_state[guild.id] = {"ativo": False, "raider_id": None, "raider_nome": "Desconhecido", "canais_apagados_ids": set(), "cargos_apagados": [], "timer": None, "ultimo_ataque": 0, "canais_raid_criados": set(), "qtd_ataques": 0}
-    # Atualiza foto depois de restaurar
     try:
         salvar_backup(guild.id, tirar_foto_guild(guild))
     except: pass
@@ -257,7 +255,6 @@ async def restaurar_tudo(guild):
 async def on_ready():
     print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP 3s")
     await bot.change_presence(activity=discord.Game(name="🛡️ SYSTEM PROTECTING"))
-    # 8 + 9 + 12. Ao ligar, tira foto de cada servidor e cria arquivo separado se não existir
     for guild in bot.guilds:
         try:
             if not os.path.exists(backup_path(guild.id)):
@@ -270,7 +267,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
-    # 12. Entrou em servidor novo, cria arquivo sozinho
     try:
         salvar_backup(guild.id, tirar_foto_guild(guild))
         print(f"📸 Novo servidor, backup criado: {guild.name}")
@@ -289,7 +285,7 @@ async def on_message(message):
         mensagens_processadas.add(message.id)
 
     if message.channel.id == SOLO_DONO_CHANNEL_ID:
-        if message.author.id != DONO_ID:
+        if message.author.id != get_dono_id(message.guild):
             try: await message.delete()
             except: pass
             return
@@ -303,7 +299,7 @@ async def on_message(message):
             await bot.process_commands(message)
         return
 
-    if is_protegido(message.author.id):
+    if is_protegido(message.guild, message.author.id):
         await bot.process_commands(message)
         return
 
@@ -335,12 +331,10 @@ async def on_member_remove(member):
 async def on_guild_channel_create(channel):
     guild = channel.guild
     st = get_raid(guild.id)
-    # 2. Se tá em raid, NÃO salva no backup, só marca como canal de raid e reseta timer
     if st["ativo"]:
         st["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
         return
-    # 9. Sem raid, atualiza backup sozinho
     try:
         dados = carregar_backup(guild.id)
         if not any(c["id"] == channel.id for c in dados["canais"]):
@@ -355,28 +349,23 @@ async def on_guild_channel_create(channel):
 async def on_guild_channel_delete(channel):
     guild = channel.guild
     st = get_raid(guild.id)
-    # 2. Se tá em raid, NÃO tira do backup, congela
     if st["ativo"]:
         st["ultimo_ataque"] = time.time()
         st["canais_apagados_ids"].add(channel.id)
         agendar_recuperacao(guild)
-        # Não recria agora, espera parar - item 4
         ex2 = await pegar_executor(guild, discord.AuditLogAction.channel_delete)
         if ex2 and registrou("canal_del", ex2, 2, 3):
             await punir(guild, ex2, "Deletou 2 canais em 3s")
         return
 
-    # SEM RAID - comportamento antigo, mas agora sem recriar na hora se for raid em andamento
     ex = await pegar_executor(guild, discord.AuditLogAction.channel_delete)
-    # 9. Sem raid, tira do backup sozinho
     try:
         dados = carregar_backup(guild.id)
         dados["canais"] = [c for c in dados["canais"] if c["id"] != channel.id]
         salvar_backup(guild.id, dados)
     except: pass
 
-    if ex and not is_protegido(ex) and ex != bot.user.id:
-        # Se for 1 canal só e não é raid, recria na hora igual antes (não quebrou)
+    if ex and not is_protegido(guild, ex) and ex != bot.user.id:
         try:
             categoria = channel.category
             overwrites = channel.overwrites
@@ -403,7 +392,6 @@ async def on_guild_channel_update(antes, depois):
         if ex and registrou("canal_rename", ex, 2, 3):
             await punir(depois.guild, ex, "Renomeou 2 canais em 3s")
     else:
-        # 9. Atualiza backup se mudou algo e não tá em raid
         st = get_raid(depois.guild.id)
         if not st["ativo"]:
             try:
@@ -445,7 +433,7 @@ async def on_guild_role_delete(role):
         dados["cargos"] = [r for r in dados["cargos"] if r["id"] != role.id]
         salvar_backup(role.guild.id, dados)
     except: pass
-    if ex and not is_protegido(ex) and ex != bot.user.id and role.name != "@everyone":
+    if ex and not is_protegido(role.guild, ex) and ex != bot.user.id and role.name != "@everyone":
         try:
             await role.guild.create_role(name=role.name, colour=role.colour, hoist=role.hoist, mentionable=role.mentionable, permissions=role.permissions, reason="BACKUP Anti-Nuke")
             print(f"♻️ BACKUP: Cargo {role.name} recriado!")
@@ -466,7 +454,7 @@ async def on_guild_role_update(antes, depois):
 @bot.event
 async def on_webhooks_update(channel):
     ex = await pegar_executor(channel.guild, discord.AuditLogAction.webhook_create)
-    if ex and not is_protegido(ex):
+    if ex and not is_protegido(channel.guild, ex):
         try:
             webs = await channel.webhooks()
             for w in webs:
@@ -498,7 +486,7 @@ async def on_raw_bulk_message_delete(payload):
 async def on_guild_update(antes, depois):
     if antes.name != depois.name or antes.icon != depois.icon:
         ex = await pegar_executor(depois, discord.AuditLogAction.guild_update)
-        if ex and not is_protegido(ex):
+        if ex and not is_protegido(depois, ex):
             try: await depois.edit(name=antes.name, icon=antes.icon)
             except: pass
             await enviar_log(depois, "🏷️ Nome/Ícone Alterado", f"**Por:** <@{ex}> (`{ex}`)\n**Ação:** Nome/ícone restaurado", cor=0xFFA500)
@@ -514,14 +502,15 @@ async def protecoes(ctx):
     embed.add_field(name="♻️ Backup Automático", value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados", inline=False)
     embed.add_field(name="🛠️ Anti-Raid / Moderação", value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa", inline=False)
     embed.add_field(name="🎨 Anti-Vandalismo", value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa", inline=False)
-    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel\n`!limpar <numero>` — Limpar mensagens (só dono)", inline=False)
+    # REMOVIDO: !limpar não aparece mais aqui, só dono sabe
+    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel", inline=False)
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
-# 11. COMANDO LIMPAR - SÓ DONO
+# 11. COMANDO LIMPAR - SÓ DONO DO SERVIDOR (automatico)
 @bot.command(name="limpar")
 async def limpar(ctx, quantidade: int = 0):
-    if ctx.author.id != DONO_ID:
+    if ctx.author.id != get_dono_id(ctx.guild):
         try: await ctx.message.delete()
         except: pass
         return
