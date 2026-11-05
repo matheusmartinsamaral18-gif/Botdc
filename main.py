@@ -29,7 +29,24 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ===== CONFIGURA =====
 DONO_ID = 926223827590078504
 ADM_CONFIANCA = []
+LOGS_CHANNEL_ID = 1567711809396277318
 # =====================
+
+async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
+    try:
+        canal = guild.get_channel(LOGS_CHANNEL_ID)
+        if canal is None:
+            canal = await bot.fetch_channel(LOGS_CHANNEL_ID)
+        if canal:
+            embed = discord.Embed(title=titulo, description=descricao, color=cor, timestamp=discord.utils.utcnow())
+            embed.set_footer(text=f"Servidor: {guild.name}")
+            await canal.send(embed=embed)
+    except Exception as e:
+        print(f"Erro log canal: {e}")
+    try:
+        dono = await bot.fetch_user(DONO_ID)
+        await dono.send(f"{titulo}\n{descricao}")
+    except: pass
 
 def is_protegido(user_id):
     return user_id == DONO_ID or user_id in ADM_CONFIANCA
@@ -49,12 +66,10 @@ async def punir(guild, executor_id, motivo):
     try:
         membro = await guild.fetch_member(executor_id)
         await membro.ban(reason=f"ANTI-NUKE: {motivo}")
-        try:
-            dono = await bot.fetch_user(DONO_ID)
-            await dono.send(f"🚨 **ANTI-NUKE**\nServidor: {guild.name}\nBanido: {membro} ({membro.id})\nMotivo: {motivo}")
-        except: pass
+        await enviar_log(guild, "🚨 ANTI-NUKE - Banido", f"**Usuário:** {membro} (`{membro.id}`)\n**Motivo:** {motivo}\n**Ação:** Banido automaticamente")
     except Exception as e:
         print(f"Erro punir: {e}")
+        await enviar_log(guild, "⚠️ Falha ao punir", f"ID: `{executor_id}`\nMotivo: {motivo}\nErro: {e}", cor=0xFFA500)
 
 async def pegar_executor(guild, action):
     try:
@@ -74,10 +89,19 @@ msgs = defaultdict(list)
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
+
+    # ===== NOVO: APAGA TUDO QUE MANDAREM NO CANAL DE LOGS =====
+    if message.channel.id == LOGS_CHANNEL_ID:
+        try: await message.delete()
+        except: pass
+        # Se for comando, ainda deixa executar mesmo apagando a msg
+        if message.content.startswith("!"):
+            await bot.process_commands(message)
+        return
+    # ==========================================================
+
     if is_protegido(message.author.id):
         await bot.process_commands(message); return
-
-    # Anti-Spam só - Anti-@everyone removido
     agora = time.time()
     msgs[message.author.id].append(agora)
     msgs[message.author.id] = [t for t in msgs[message.author.id] if agora - t < 3]
@@ -85,6 +109,7 @@ async def on_message(message):
         msgs[message.author.id] = []
         try: await message.author.timeout(timedelta(minutes=10), reason="Spam")
         except: pass
+        await enviar_log(message.guild, "💬 Anti-Spam - Mute", f"**Usuário:** {message.author.mention} (`{message.author.id}`)\n**Canal:** {message.channel.mention}\n**Ação:** Mutado por 10 minutos (5 msgs em 3s)", cor=0xFFA500)
         return
     await bot.process_commands(message)
 
@@ -122,7 +147,9 @@ async def on_guild_channel_delete(channel):
                 novo = await guild.create_category(name=channel.name, position=channel.position, overwrites=overwrites, reason="BACKUP Anti-Nuke")
             else:
                 novo = None
-            if novo: print(f"♻️ BACKUP: Canal #{channel.name} recriado!")
+            if novo:
+                print(f"♻️ BACKUP: Canal #{channel.name} recriado!")
+                await enviar_log(guild, "♻️ Backup - Canal Recriado", f"**Canal:** #{channel.name}\n**Deletado por:** <@{ex}> (`{ex}`)\n**Ação:** Canal recriado automaticamente", cor=0x2ecc71)
         except Exception as e:
             print(f"Erro backup canal: {e}")
     if ex and registrou("canal_del", ex, 2, 3):
@@ -148,6 +175,7 @@ async def on_guild_role_delete(role):
         try:
             await role.guild.create_role(name=role.name, colour=role.colour, hoist=role.hoist, mentionable=role.mentionable, permissions=role.permissions, reason="BACKUP Anti-Nuke")
             print(f"♻️ BACKUP: Cargo {role.name} recriado!")
+            await enviar_log(role.guild, "♻️ Backup - Cargo Recriado", f"**Cargo:** {role.name}\n**Deletado por:** <@{ex}> (`{ex}`)\n**Ação:** Cargo recriado automaticamente", cor=0x2ecc71)
         except Exception as e:
             print(f"Erro backup cargo: {e}")
     if ex and registrou("cargo_del", ex, 2, 3):
@@ -157,7 +185,9 @@ async def on_guild_role_delete(role):
 async def on_guild_role_update(antes, depois):
     if not antes.permissions.administrator and depois.permissions.administrator:
         ex = await pegar_executor(depois.guild, discord.AuditLogAction.role_update)
-        if ex: await punir(depois.guild, ex, "Tentou dar ADM via cargo")
+        if ex:
+            await enviar_log(depois.guild, "⚠️ Tentativa de dar ADM", f"**Por:** <@{ex}> (`{ex}`)\n**Cargo:** {depois.name}\n**Ação:** Tentou dar ADM via cargo", cor=0xFFA500)
+            await punir(depois.guild, ex, "Tentou dar ADM via cargo")
 
 @bot.event
 async def on_webhooks_update(channel):
@@ -197,6 +227,7 @@ async def on_guild_update(antes, depois):
         if ex and not is_protegido(ex):
             try: await depois.edit(name=antes.name, icon=antes.icon)
             except: pass
+            await enviar_log(depois, "🏷️ Nome/Ícone Alterado", f"**Por:** <@{ex}> (`{ex}`)\n**Ação:** Nome/ícone restaurado", cor=0xFFA500)
             await punir(depois, ex, "Tentou mudar nome/icone do server")
 
 # ===== COMANDOS =====
@@ -208,48 +239,20 @@ async def destravar(ctx):
         try:
             await c.set_permissions(ctx.guild.default_role, send_messages=True)
         except: pass
-    embed = discord.Embed(
-        title="🔓 Servidor destravado!",
-        description="Todos os canais de texto foram liberados para enviar mensagens.",
-        color=0x2ecc71
-    )
+    embed = discord.Embed(title="🔓 Servidor destravado!", description="Todos os canais de texto foram liberados para enviar mensagens.", color=0x2ecc71)
     embed.set_footer(text=f"Destravado por {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+    await enviar_log(ctx.guild, "🔓 Servidor Destravado", f"**Por:** {ctx.author.mention}\n**Ação:** Todos os canais liberados", cor=0x2ecc71)
 
 @bot.command()
 async def protecoes(ctx):
-    embed = discord.Embed(
-        title="🛡️ ANTI-NUKE | Proteções Ativas",
-        description="O servidor está protegido 24h. Qualquer ataque é revertido e o autor é banido na hora.",
-        color=0x5865F2
-    )
+    embed = discord.Embed(title="🛡️ ANTI-NUKE | Proteções Ativas", description="O servidor está protegido 24h. Qualquer ataque é revertido e o autor é banido na hora.", color=0x5865F2)
     embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else bot.user.display_avatar.url)
-
-    embed.add_field(
-        name="⚔️ Anti-Nuke",
-        value="> 🚫 Mass Ban — 2 bans em 3s\n> 🚫 Mass Kick — 2 kicks em 3s\n> 🚫 Dar ADM via cargo\n> 🚫 Criar webhook suspeito",
-        inline=False
-    )
-    embed.add_field(
-        name="♻️ Backup Automático",
-        value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados",
-        inline=False
-    )
-    embed.add_field(
-        name="🛠️ Anti-Raid / Moderação",
-        value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa",
-        inline=False
-    )
-    embed.add_field(
-        name="🎨 Anti-Vandalismo",
-        value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa",
-        inline=False
-    )
-    embed.add_field(
-        name="📌 Comandos",
-        value="`!protecoes` — Ver este painel\n`!destravar` — Liberar todos os canais (ADM)",
-        inline=False
-    )
+    embed.add_field(name="⚔️ Anti-Nuke", value="> 🚫 Mass Ban — 2 bans em 3s\n> 🚫 Mass Kick — 2 kicks em 3s\n> 🚫 Dar ADM via cargo\n> 🚫 Criar webhook suspeito", inline=False)
+    embed.add_field(name="♻️ Backup Automático", value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados", inline=False)
+    embed.add_field(name="🛠️ Anti-Raid / Moderação", value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa", inline=False)
+    embed.add_field(name="🎨 Anti-Vandalismo", value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa", inline=False)
+    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel\n`!destravar` — Liberar todos os canais (ADM)", inline=False)
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
