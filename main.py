@@ -68,7 +68,7 @@ async def pegar_executor(guild, action):
 @bot.event
 async def on_ready():
     print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP 3s")
-    await bot.change_presence(activity=discord.Game(name="🛡️ Anti-Nuke + Backup"))
+    await bot.change_presence(activity=discord.CustomActivity(name="🛡️ SYSTEM ONLINE"))
 
 msgs = defaultdict(list)
 @bot.event
