@@ -27,7 +27,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ===== CONFIGURA =====
-DONO_ID = 92622382759007850
+DONO_ID = 926223827590078504
 ADM_CONFIANCA = []
 # =====================
 
@@ -203,16 +203,59 @@ async def on_guild_update(antes, depois):
             except: pass
             await punir(depois, ex, "Tentou mudar nome/icone do server")
 
+# ===== COMANDOS =====
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def destravar(ctx):
     for c in ctx.guild.text_channels:
-        await c.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("✅ Destravado!")
+        try:
+            await c.set_permissions(ctx.guild.default_role, send_messages=True)
+        except: pass
+    embed = discord.Embed(
+        title="🔓 Servidor destravado!",
+        description="Todos os canais de texto foram liberados para enviar mensagens.",
+        color=0x2ecc71
+    )
+    embed.set_footer(text=f"Destravado por {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def protecoes(ctx):
-    await ctx.send("🛡️ **ANTI-NUKE + BACKUP 3s:**\n1 Anti-Spam\n2 Anti-@everyone\n3 Anti-Mass Ban (2 em 3s)\n4 Anti-Mass Kick (2 em 3s)\n5 Anti-Criar/Deletar Canal + Backup\n6 Anti-Criar/Deletar Cargo + Backup\n7 Anti-Dar ADM (ban na hora)\n8 Anti-Webhook (ban na hora)\n9 Anti-Deletar Emoji/Sticker\n10 Anti-Apagar Mensagens\n11 Anti-Mudar Nome do Server")
+    embed = discord.Embed(
+        title="🛡️ ANTI-NUKE | Proteções Ativas",
+        description="O servidor está protegido 24h. Qualquer ataque é revertido e o autor é banido na hora.",
+        color=0x5865F2
+    )
+    embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else bot.user.display_avatar.url)
+
+    embed.add_field(
+        name="⚔️ Anti-Nuke",
+        value="> 🚫 Mass Ban — 2 bans em 3s\n> 🚫 Mass Kick — 2 kicks em 3s\n> 🚫 Dar ADM via cargo\n> 🚫 Criar webhook suspeito",
+        inline=False
+    )
+    embed.add_field(
+        name="♻️ Backup Automático",
+        value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados",
+        inline=False
+    )
+    embed.add_field(
+        name="🛠️ Anti-Raid / Moderação",
+        value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 📢 Anti-@everyone / @here sem permissão\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa",
+        inline=False
+    )
+    embed.add_field(
+        name="🎨 Anti-Vandalismo",
+        value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa",
+        inline=False
+    )
+    embed.add_field(
+        name="📌 Comandos",
+        value="`!protecoes` — Ver este painel\n`!destravar` — Liberar todos os canais (ADM)",
+        inline=False
+    )
+    embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
+    await ctx.send(embed=embed)
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
