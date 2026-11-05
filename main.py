@@ -89,17 +89,12 @@ msgs = defaultdict(list)
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
-
-    # ===== NOVO: APAGA TUDO QUE MANDAREM NO CANAL DE LOGS =====
     if message.channel.id == LOGS_CHANNEL_ID:
         try: await message.delete()
         except: pass
-        # Se for comando, ainda deixa executar mesmo apagando a msg
         if message.content.startswith("!"):
             await bot.process_commands(message)
         return
-    # ==========================================================
-
     if is_protegido(message.author.id):
         await bot.process_commands(message); return
     agora = time.time()
@@ -233,18 +228,6 @@ async def on_guild_update(antes, depois):
 # ===== COMANDOS =====
 
 @bot.command()
-@commands.has_permissions(administrator=True)
-async def destravar(ctx):
-    for c in ctx.guild.text_channels:
-        try:
-            await c.set_permissions(ctx.guild.default_role, send_messages=True)
-        except: pass
-    embed = discord.Embed(title="🔓 Servidor destravado!", description="Todos os canais de texto foram liberados para enviar mensagens.", color=0x2ecc71)
-    embed.set_footer(text=f"Destravado por {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed)
-    await enviar_log(ctx.guild, "🔓 Servidor Destravado", f"**Por:** {ctx.author.mention}\n**Ação:** Todos os canais liberados", cor=0x2ecc71)
-
-@bot.command()
 async def protecoes(ctx):
     embed = discord.Embed(title="🛡️ ANTI-NUKE | Proteções Ativas", description="O servidor está protegido 24h. Qualquer ataque é revertido e o autor é banido na hora.", color=0x5865F2)
     embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else bot.user.display_avatar.url)
@@ -252,7 +235,7 @@ async def protecoes(ctx):
     embed.add_field(name="♻️ Backup Automático", value="> 📁 Canais deletados são recriados\n> 🎭 Cargos deletados são recriados\n> 🏷️ Nome e ícone do servidor restaurados", inline=False)
     embed.add_field(name="🛠️ Anti-Raid / Moderação", value="> 💬 Anti-Spam — 5 msgs em 3s = mute 10min\n> 🧹 Anti-apagar mensagens em massa\n> ✏️ Anti-renomear canais em massa", inline=False)
     embed.add_field(name="🎨 Anti-Vandalismo", value="> 😀 Anti-deletar emojis\n> 🌟 Anti-deletar stickers\n> ➕ Anti-criar / deletar canais e cargos em massa", inline=False)
-    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel\n`!destravar` — Liberar todos os canais (ADM)", inline=False)
+    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel", inline=False)
     embed.set_footer(text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}", icon_url=bot.user.display_avatar.url)
     await ctx.send(embed=embed)
 
