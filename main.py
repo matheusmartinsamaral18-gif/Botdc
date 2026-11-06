@@ -13,7 +13,12 @@ from datetime import timedelta
 # =========================================================
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    help_command=None
+)
 
 ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
@@ -24,6 +29,8 @@ JANELA_RAID = 3
 LIMITE_RESTAURACAO = 12
 INTERVALO_AUDIT = 0.35
 MAX_TENTATIVAS_AUDIT = 4
+
+VIEWS_REGISTRADAS = False
 
 # =========================================================
 # MAPA DE IDS DOS CANAIS
@@ -414,7 +421,7 @@ async def sync_backup_loop():
             salvar_backup_bom(guild.id, foto)
 
             print(
-                f"🔄 Backup BOM atualizado: {guild.name}"
+                f"🔄 Backup atualizado: {guild.name}"
             )
 
         except Exception as erro:
@@ -1282,6 +1289,8 @@ async def punir(guild, executor_id, motivo):
 
 @bot.event
 async def on_ready():
+    global VIEWS_REGISTRADAS
+
     print(
         f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO"
     )
@@ -1291,6 +1300,13 @@ async def on_ready():
             name="🛡️ SYSTEM PROTECTING"
         )
     )
+
+    # Registra os botões persistentes dos tickets.
+    if not VIEWS_REGISTRADAS:
+        bot.add_view(TicketPanelView())
+        bot.add_view(TicketCloseView())
+
+        VIEWS_REGISTRADAS = True
 
     for guild in bot.guilds:
         try:
@@ -1381,6 +1397,40 @@ async def on_message(message):
     if len(mensagens_processadas) > 5000:
         mensagens_processadas.clear()
 
+    # =====================================================
+    # CONTROLE DE COMANDOS
+    # =====================================================
+
+    if message.content.startswith("!"):
+        ctx = await bot.get_context(message)
+
+        # Apaga a mensagem de comando.
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        # Comando inexistente: ignora silenciosamente.
+        if ctx.command is None:
+            return
+
+        # !recursos é liberado para todos.
+        if ctx.command.qualified_name == "recursos":
+            await bot.invoke(ctx)
+            return
+
+        # Todos os outros comandos são exclusivos
+        # do dono daquele servidor.
+        if message.author.id != message.guild.owner_id:
+            return
+
+        await bot.invoke(ctx)
+        return
+
+    # =====================================================
+    # CANAL EXCLUSIVO DO DONO
+    # =====================================================
+
     canal_dono = resolver_canal_configurado(
         message.guild,
         SOLO_DONO_CHANNEL_ID
@@ -1399,10 +1449,11 @@ async def on_message(message):
             except discord.HTTPException:
                 pass
 
-            return
-
-        await bot.process_commands(message)
         return
+
+    # =====================================================
+    # CANAL DE LOGS
+    # =====================================================
 
     canal_logs = resolver_canal_configurado(
         message.guild,
@@ -1413,15 +1464,6 @@ async def on_message(message):
         canal_logs
         and message.channel.id == canal_logs.id
     ):
-        if (
-            message.content.startswith("!")
-            and is_protegido(
-                message.guild,
-                message.author.id
-            )
-        ):
-            await bot.process_commands(message)
-
         try:
             await message.delete()
         except discord.HTTPException:
@@ -1429,18 +1471,12 @@ async def on_message(message):
 
         return
 
-    if is_protegido(
-        message.guild,
-        message.author.id
-    ):
-        await bot.process_commands(message)
-        return
-
-    if message.content.startswith("!"):
-        await bot.process_commands(message)
-        return
+    # =====================================================
+    # ANTI-SPAM
+    # =====================================================
 
     agora = time.time()
+
     chave = (
         message.guild.id,
         message.author.id
@@ -1486,8 +1522,6 @@ async def on_message(message):
             )
 
         return
-
-    await bot.process_commands(message)
 
 
 # =========================================================
@@ -2240,17 +2274,16 @@ async def on_guild_update(
 
 
 # =========================================================
-# COMANDO: PROTEÇÕES
+# COMANDO: RECURSOS
 # =========================================================
 
-@bot.command()
-async def protecoes(ctx):
+@bot.command(name="recursos")
+async def recursos(ctx):
     embed = discord.Embed(
-        title="🛡️ ANTI-NUKE | Proteções Ativas",
+        title="🛡️ RECURSOS DO SISTEMA",
         description=(
-            "O servidor está protegido. Ações suspeitas são "
-            "registradas e a estrutura salva no backup BOM "
-            "pode ser restaurada."
+            "Conheça as principais funcionalidades "
+            "disponíveis no bot."
         ),
         color=0x5865F2
     )
@@ -2264,57 +2297,37 @@ async def protecoes(ctx):
     )
 
     embed.add_field(
-        name="⚔️ Anti-Nuke",
+        name="🛡️ Proteção Antiraid",
         value=(
-            "> 🚫 Mass Ban — 2 bans em 3s\n"
-            "> 🚫 Mass Kick — 2 kicks em 3s\n"
-            "> 🚫 Alteração de permissões / tentativa de dar ADM\n"
-            "> 🚫 Criação de webhook suspeito"
+            "> Proteção contra ataques e ações em massa.\n"
+            "> Monitoramento de canais, cargos e webhooks.\n"
+            "> Identificação de responsáveis por ações suspeitas."
         ),
         inline=False
     )
 
     embed.add_field(
-        name="♻️ Backup Automático",
+        name="📦 Backup e Restauração",
         value=(
-            "> 📁 Canais deletados são recriados\n"
-            "> 🎭 Cargos deletados são recriados\n"
-            "> 🏷️ Nome e ícone do servidor restaurados"
+            "> Backup automático do servidor.\n"
+            "> Atualização manual do backup.\n"
+            "> Restauração de canais e cargos."
         ),
         inline=False
     )
 
     embed.add_field(
-        name="🛠️ Anti-Raid / Moderação",
+        name="🎫 Sistema de Tickets",
         value=(
-            "> 💬 Anti-Spam — 5 mensagens em 3s = timeout 10min\n"
-            "> 🧹 Detecção de exclusão em massa\n"
-            "> ✏️ Detecção de alterações em canais"
+            "> Painel para abertura de tickets.\n"
+            "> Canais privados de atendimento.\n"
+            "> Opção para fechar tickets."
         ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🎨 Anti-Vandalismo",
-        value=(
-            "> 😀 Exclusão de emojis\n"
-            "> 🌟 Exclusão de stickers\n"
-            "> ➕ Criação/exclusão em massa de canais e cargos"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Comandos",
-        value="`!protecoes` — Ver este painel",
         inline=False
     )
 
     embed.set_footer(
-        text=(
-            f"Servidor: {ctx.guild.name} "
-            f"• Protegido por {bot.user.name}"
-        ),
+        text="SEGURANÇA E ATENDIMENTO EM UM SÓ LUGAR.",
         icon_url=bot.user.display_avatar.url
     )
 
@@ -2338,15 +2351,7 @@ async def atualizar_backup(
     *,
     arg: str = ""
 ):
-    if not is_protegido(
-        ctx.guild,
-        ctx.author.id
-    ):
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
-
+    if ctx.author.id != ctx.guild.owner_id:
         return
 
     if ctx.invoked_with in (
@@ -2391,7 +2396,7 @@ async def atualizar_backup(
         )
 
         await ctx.send(
-            f"✅ Backup BOM atualizado! "
+            f"✅ Backup atualizado! "
             f"**{len(foto['canais'])} canais** "
             f"e **{len(foto['cargos'])} cargos** salvos.",
             delete_after=8
@@ -2418,15 +2423,7 @@ async def limpar(
     ctx,
     quantidade: int = 0
 ):
-    if not is_protegido(
-        ctx.guild,
-        ctx.author.id
-    ):
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
-
+    if ctx.author.id != ctx.guild.owner_id:
         return
 
     if quantidade <= 0 or quantidade > 1000:
@@ -2434,18 +2431,7 @@ async def limpar(
             "Usa assim: `!limpar 100` — número entre 1 e 1000",
             delete_after=5
         )
-
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
-
         return
-
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
 
     apagadas = 0
     restante = quantidade
@@ -2479,6 +2465,265 @@ async def limpar(
         f"🧹 Limpas **{apagadas}** mensagens!",
         delete_after=5
     )
+
+
+# =========================================================
+# SISTEMA DE TICKETS
+# =========================================================
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Fechar ticket",
+        emoji="🔒",
+        style=discord.ButtonStyle.danger,
+        custom_id="ticket_fechar"
+    )
+    async def fechar_ticket(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        canal = interaction.channel
+        guild = interaction.guild
+
+        if guild is None or not isinstance(
+            canal,
+            discord.TextChannel
+        ):
+            return
+
+        if (
+            interaction.user.id != guild.owner_id
+            and not interaction.user.guild_permissions.manage_channels
+        ):
+            await interaction.response.send_message(
+                "Você não tem permissão para fechar este ticket.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "🔒 Este ticket será fechado.",
+            ephemeral=True
+        )
+
+        await asyncio.sleep(2)
+
+        try:
+            await canal.delete(
+                reason=f"Ticket fechado por {interaction.user}"
+            )
+        except Exception as erro:
+            print(f"Erro fechando ticket: {erro}")
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Abrir ticket",
+        emoji="🎫",
+        style=discord.ButtonStyle.success,
+        custom_id="ticket_abrir"
+    )
+    async def abrir_ticket(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        guild = interaction.guild
+        membro = interaction.user
+        canal_painel = interaction.channel
+
+        if guild is None:
+            return
+
+        if not isinstance(
+            canal_painel,
+            discord.TextChannel
+        ):
+            return
+
+        # Verifica se o usuário já possui ticket aberto.
+        for canal in guild.text_channels:
+            if canal.topic == f"ticket_owner:{membro.id}":
+                await interaction.response.send_message(
+                    f"Você já possui um ticket aberto: {canal.mention}",
+                    ephemeral=True
+                )
+                return
+
+        # Usa a mesma categoria do canal onde está o painel.
+        categoria = canal_painel.category
+
+        nome = membro.name.lower()
+
+        nome = "".join(
+            caractere
+            if caractere.isalnum() or caractere == "-"
+            else "-"
+            for caractere in nome
+        )
+
+        nome = nome.strip("-")[:80] or "usuario"
+
+        nome_canal = f"ticket-{nome}"
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False
+            ),
+
+            membro: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True,
+                embed_links=True
+            )
+        }
+
+        # Permissão para o dono do servidor.
+        dono = guild.get_member(guild.owner_id)
+
+        if dono:
+            overwrites[dono] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True
+            )
+
+        # Permissões do bot.
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True
+            )
+
+        try:
+            await interaction.response.defer(
+                ephemeral=True
+            )
+
+            ticket = await guild.create_text_channel(
+                name=nome_canal,
+                category=categoria,
+                topic=f"ticket_owner:{membro.id}",
+                overwrites=overwrites,
+                reason=f"Ticket aberto por {membro}"
+            )
+
+            embed = discord.Embed(
+                title="🎫 Ticket aberto",
+                description=(
+                    f"Olá {membro.mention}!\n\n"
+                    "Explique o motivo do seu contato "
+                    "e aguarde o atendimento.\n\n"
+                    "Utilize o botão abaixo para fechar "
+                    "este ticket quando terminar."
+                ),
+                color=0x2ECC71
+            )
+
+            embed.set_footer(
+                text=f"Ticket de {membro}"
+            )
+
+            await ticket.send(
+                content=membro.mention,
+                embed=embed,
+                view=TicketCloseView()
+            )
+
+            await interaction.followup.send(
+                f"Seu ticket foi criado: {ticket.mention}",
+                ephemeral=True
+            )
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Não tenho permissão para criar o ticket. "
+                "Verifique minhas permissões e minha posição na hierarquia.",
+                ephemeral=True
+            )
+
+        except Exception as erro:
+            print(f"Erro criando ticket: {erro}")
+
+            await interaction.followup.send(
+                "Ocorreu um erro ao criar seu ticket.",
+                ephemeral=True
+            )
+
+
+# =========================================================
+# COMANDO: CONFIGURAR PAINEL DE TICKETS
+# =========================================================
+
+@bot.group(
+    name="ticket",
+    invoke_without_command=True
+)
+async def ticket(ctx):
+    await ctx.send(
+        "Use: `!ticket painel #canal`",
+        delete_after=5
+    )
+
+
+@ticket.command(name="painel")
+async def ticket_painel(
+    ctx,
+    canal: discord.TextChannel
+):
+    if ctx.author.id != ctx.guild.owner_id:
+        return
+
+    embed = discord.Embed(
+        title="🎫 Central de Atendimento",
+        description=(
+            "Precisa de ajuda ou deseja falar com a equipe?\n\n"
+            "Clique no botão abaixo para abrir um ticket privado.\n"
+            "Nossa equipe poderá atender você por lá."
+        ),
+        color=0x5865F2
+    )
+
+    embed.set_footer(
+        text=f"{ctx.guild.name} • Sistema de Tickets"
+    )
+
+    try:
+        await canal.send(
+            embed=embed,
+            view=TicketPanelView()
+        )
+
+        await ctx.send(
+            f"✅ Painel de tickets publicado em {canal.mention}.",
+            delete_after=5
+        )
+
+    except discord.Forbidden:
+        await ctx.send(
+            "❌ Não tenho permissão para enviar mensagens nesse canal.",
+            delete_after=5
+        )
+
+    except Exception as erro:
+        print(f"Erro publicando painel: {erro}")
+
+        await ctx.send(
+            "❌ Não foi possível publicar o painel.",
+            delete_after=5
+        )
 
 
 # =========================================================
