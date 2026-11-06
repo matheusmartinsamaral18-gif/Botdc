@@ -5,8 +5,9 @@ import time
 import json
 import asyncio
 import inspect
+import io
 from collections import defaultdict
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 
 # =========================================================
 # CONFIGURAÇÃO
@@ -30,7 +31,13 @@ LIMITE_RESTAURACAO = 12
 INTERVALO_AUDIT = 0.35
 MAX_TENTATIVAS_AUDIT = 4
 
+TEMPO_ALERTA_TICKET = 30 * 60
+
 VIEWS_REGISTRADAS = False
+
+# Locks para evitar dois tickets com o mesmo número.
+locks_tickets = defaultdict(asyncio.Lock)
+
 
 # =========================================================
 # MAPA DE IDS DOS CANAIS
@@ -42,16 +49,10 @@ def arquivo_mapa_canais(guild_id):
 
 def carregar_mapa_canais(guild_id):
     try:
-        with open(
-            arquivo_mapa_canais(guild_id),
-            "r",
-            encoding="utf-8"
-        ) as f:
+        with open(arquivo_mapa_canais(guild_id), "r", encoding="utf-8") as f:
             dados = json.load(f)
-
             if isinstance(dados, dict):
                 return dados
-
     except Exception:
         pass
 
@@ -60,15 +61,9 @@ def carregar_mapa_canais(guild_id):
 
 def salvar_mapa_canais(guild_id, mapa):
     try:
-        with open(
-            arquivo_mapa_canais(guild_id),
-            "w",
-            encoding="utf-8"
-        ) as f:
+        with open(arquivo_mapa_canais(guild_id), "w", encoding="utf-8") as f:
             json.dump(mapa, f, indent=2)
-
         return True
-
     except Exception as erro:
         print(f"Erro salvando mapa de canais: {erro}")
         return False
@@ -83,7 +78,6 @@ def registrar_novo_id_canal(guild_id, id_antigo, id_novo):
 def resolver_canal_configurado(guild, id_original):
     mapa = carregar_mapa_canais(guild.id)
     id_atual = mapa.get(str(id_original), id_original)
-
     return guild.get_channel(int(id_atual))
 
 
@@ -179,9 +173,7 @@ def _salvar_arquivo(path, dados):
 
 
 def carregar_backup(guild_id):
-    dados = _carregar_arquivo(
-        backup_bom_path(guild_id)
-    )
+    dados = _carregar_arquivo(backup_bom_path(guild_id))
 
     if not dados["canais"] and not dados["cargos"]:
         antigo = f"backup_{guild_id}.json"
@@ -191,45 +183,26 @@ def carregar_backup(guild_id):
 
             if dados_antigos["canais"] or dados_antigos["cargos"]:
                 dados = dados_antigos
-
-                _salvar_arquivo(
-                    backup_bom_path(guild_id),
-                    dados
-                )
-
-                _salvar_arquivo(
-                    backup_temp_path(guild_id),
-                    dados
-                )
+                _salvar_arquivo(backup_bom_path(guild_id), dados)
+                _salvar_arquivo(backup_temp_path(guild_id), dados)
 
     return dados
 
 
 def carregar_backup_temp(guild_id):
-    return _carregar_arquivo(
-        backup_temp_path(guild_id)
-    )
+    return _carregar_arquivo(backup_temp_path(guild_id))
 
 
 def salvar_backup(guild_id, dados):
-    return _salvar_arquivo(
-        backup_bom_path(guild_id),
-        dados
-    )
+    return _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 
 def salvar_backup_temp(guild_id, dados):
-    return _salvar_arquivo(
-        backup_temp_path(guild_id),
-        dados
-    )
+    return _salvar_arquivo(backup_temp_path(guild_id), dados)
 
 
 def salvar_backup_bom(guild_id, dados):
-    return _salvar_arquivo(
-        backup_bom_path(guild_id),
-        dados
-    )
+    return _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 
 def snapshot_canal(ch):
@@ -296,15 +269,11 @@ def tirar_foto_guild(guild):
     }
 
     for canal in guild.channels:
-        dados["canais"].append(
-            snapshot_canal(canal)
-        )
+        dados["canais"].append(snapshot_canal(canal))
 
     for role in guild.roles:
         if role.name != "@everyone" and not role.managed:
-            dados["cargos"].append(
-                snapshot_cargo(role)
-            )
+            dados["cargos"].append(snapshot_cargo(role))
 
     return dados
 
@@ -317,7 +286,6 @@ def atualizar_canal_no_backup_temp(guild_id, canal):
         if atual.get("id") == canal.id:
             dados["canais"][i] = item
             break
-
     else:
         dados["canais"].append(item)
 
@@ -410,9 +378,7 @@ async def sync_backup_loop():
     for guild in bot.guilds:
         try:
             if teve_raid_recente(guild.id, 30):
-                print(
-                    f"⏸️ Sync pulado em {guild.name}: raid recente."
-                )
+                print(f"⏸️ Sync pulado em {guild.name}: raid recente.")
                 continue
 
             foto = tirar_foto_guild(guild)
@@ -420,14 +386,10 @@ async def sync_backup_loop():
             salvar_backup_temp(guild.id, foto)
             salvar_backup_bom(guild.id, foto)
 
-            print(
-                f"🔄 Backup atualizado: {guild.name}"
-            )
+            print(f"🔄 Backup atualizado: {guild.name}")
 
         except Exception as erro:
-            print(
-                f"Erro sync backup {guild.name}: {erro}"
-            )
+            print(f"Erro sync backup {guild.name}: {erro}")
 
 
 @sync_backup_loop.before_loop
@@ -439,17 +401,9 @@ async def antes_sync():
 # LOGS
 # =========================================================
 
-async def enviar_log_simples(
-    guild,
-    titulo,
-    descricao,
-    cor=0xFF0000
-):
+async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
     try:
-        canal = resolver_canal_configurado(
-            guild,
-            LOGS_CHANNEL_ID
-        )
+        canal = resolver_canal_configurado(guild, LOGS_CHANNEL_ID)
 
         if canal and hasattr(canal, "send"):
             embed = discord.Embed(
@@ -459,10 +413,7 @@ async def enviar_log_simples(
                 timestamp=discord.utils.utcnow()
             )
 
-            embed.set_footer(
-                text=f"Servidor: {guild.name}"
-            )
-
+            embed.set_footer(text=f"Servidor: {guild.name}")
             await canal.send(embed=embed)
 
     except Exception as erro:
@@ -481,51 +432,29 @@ async def enviar_log_simples(
         for user_id in destinos:
             try:
                 usuario = await bot.fetch_user(user_id)
-                await usuario.send(
-                    f"{titulo}\n{descricao}"
-                )
+                await usuario.send(f"{titulo}\n{descricao}")
                 await asyncio.sleep(0.5)
-
             except Exception:
                 pass
 
 
-async def enviar_log(
-    guild,
-    titulo,
-    descricao,
-    cor=0xFF0000
-):
-    await enviar_log_simples(
-        guild,
-        titulo,
-        descricao,
-        cor
-    )
+async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
+    await enviar_log_simples(guild, titulo, descricao, cor)
 
 
 # =========================================================
 # AUDIT LOG
 # =========================================================
 
-async def pegar_executor(
-    guild,
-    action,
-    target_id=None,
-    janela=12
-):
+async def pegar_executor(guild, action, target_id=None, janela=12):
     if guild is None:
         return None
 
     for tentativa in range(MAX_TENTATIVAS_AUDIT):
         try:
-            async for entrada in guild.audit_logs(
-                limit=12,
-                action=action
-            ):
+            async for entrada in guild.audit_logs(limit=12, action=action):
                 idade = (
-                    discord.utils.utcnow()
-                    - entrada.created_at
+                    discord.utils.utcnow() - entrada.created_at
                 ).total_seconds()
 
                 if idade < 0 or idade > janela:
@@ -534,18 +463,11 @@ async def pegar_executor(
                 if entrada.user is None:
                     continue
 
-                if (
-                    bot.user
-                    and entrada.user.id == bot.user.id
-                ):
+                if bot.user and entrada.user.id == bot.user.id:
                     continue
 
                 if target_id is not None:
-                    alvo = getattr(
-                        entrada,
-                        "target",
-                        None
-                    )
+                    alvo = getattr(entrada, "target", None)
 
                     if (
                         alvo is None
@@ -556,20 +478,14 @@ async def pegar_executor(
                 return entrada.user.id
 
         except discord.Forbidden:
-            print(
-                f"Sem permissão para consultar Audit Log em {guild.name}."
-            )
+            print(f"Sem permissão para consultar Audit Log em {guild.name}.")
             return None
 
         except Exception as erro:
-            print(
-                f"Erro consultando Audit Log: {erro}"
-            )
+            print(f"Erro consultando Audit Log: {erro}")
 
         if tentativa < MAX_TENTATIVAS_AUDIT - 1:
-            await asyncio.sleep(
-                INTERVALO_AUDIT
-            )
+            await asyncio.sleep(INTERVALO_AUDIT)
 
     return None
 
@@ -592,16 +508,11 @@ def agendar_recuperacao(guild):
             while estado["ativo"]:
                 restante = (
                     LIMITE_RESTAURACAO
-                    - (
-                        time.time()
-                        - estado["ultimo_ataque"]
-                    )
+                    - (time.time() - estado["ultimo_ataque"])
                 )
 
                 if restante > 0:
-                    await asyncio.sleep(
-                        min(restante, 2)
-                    )
+                    await asyncio.sleep(min(restante, 2))
                     continue
 
                 await restaurar_tudo(guild)
@@ -611,27 +522,34 @@ def agendar_recuperacao(guild):
             raise
 
         except Exception as erro:
-            print(
-                f"Erro na tarefa de restauração: {erro}"
-            )
+            print(f"Erro na tarefa de restauração: {erro}")
 
         finally:
             if estado.get("timer") is asyncio.current_task():
                 estado["timer"] = None
 
-    estado["timer"] = asyncio.create_task(
-        esperar_e_restaurar()
-    )
+    estado["timer"] = asyncio.create_task(esperar_e_restaurar())
 
 
-def construir_overwrites(guild, lista):
+# =========================================================
+# PERMISSÕES DOS CANAIS NO BACKUP
+# =========================================================
+
+def construir_overwrites(guild, lista, mapa_cargos=None):
     overwrites = {}
+    mapa_cargos = mapa_cargos or {}
 
     for ow in lista:
         if ow.get("is_role", False):
-            alvo = guild.get_role(ow["id"])
+            id_antigo = int(ow["id"])
+
+            alvo = (
+                mapa_cargos.get(id_antigo)
+                or mapa_cargos.get(str(id_antigo))
+                or guild.get_role(id_antigo)
+            )
         else:
-            alvo = guild.get_member(ow["id"])
+            alvo = guild.get_member(int(ow["id"]))
 
         if alvo is not None:
             overwrites[alvo] = (
@@ -651,7 +569,8 @@ def construir_overwrites(guild, lista):
 async def criar_canal_backup(
     guild,
     dados,
-    mapa_categorias
+    mapa_categorias,
+    mapa_cargos=None
 ):
     tipo = dados.get("type", "")
     nome = dados["name"]
@@ -666,12 +585,11 @@ async def criar_canal_backup(
 
     overwrites = construir_overwrites(
         guild,
-        dados.get("overwrites", [])
+        dados.get("overwrites", []),
+        mapa_cargos
     )
 
-    motivo = (
-        "Anti-Nuke: restauração do backup BOM"
-    )
+    motivo = "Anti-Nuke: restauração do backup BOM"
 
     if "category" in tipo:
         novo = await guild.create_category(
@@ -701,17 +619,12 @@ async def criar_canal_backup(
             ).parameters
 
             if "news" in parametros:
-                kwargs["news"] = dados.get(
-                    "news",
-                    False
-                )
+                kwargs["news"] = dados.get("news", False)
 
         except Exception:
             pass
 
-        novo = await guild.create_text_channel(
-            **kwargs
-        )
+        novo = await guild.create_text_channel(**kwargs)
 
     elif "voice" in tipo:
         novo = await guild.create_voice_channel(
@@ -725,11 +638,7 @@ async def criar_canal_backup(
         )
 
     elif "forum" in tipo:
-        metodo = getattr(
-            guild,
-            "create_forum",
-            None
-        )
+        metodo = getattr(guild, "create_forum", None)
 
         if metodo is None:
             raise RuntimeError(
@@ -748,11 +657,7 @@ async def criar_canal_backup(
         )
 
     elif "stage" in tipo:
-        metodo = getattr(
-            guild,
-            "create_stage_channel",
-            None
-        )
+        metodo = getattr(guild, "create_stage_channel", None)
 
         if metodo is None:
             raise RuntimeError(
@@ -769,21 +674,12 @@ async def criar_canal_backup(
         )
 
     else:
-        raise RuntimeError(
-            f"Tipo de canal não suportado: {tipo}"
-        )
+        raise RuntimeError(f"Tipo de canal não suportado: {tipo}")
 
     estado = get_raid(guild.id)
+    estado["canais_criados_pelo_bot"].add(novo.id)
 
-    estado["canais_criados_pelo_bot"].add(
-        novo.id
-    )
-
-    registrar_novo_id_canal(
-        guild.id,
-        dados["id"],
-        novo.id
-    )
+    registrar_novo_id_canal(guild.id, dados["id"], novo.id)
 
     return novo
 
@@ -805,10 +701,7 @@ async def restaurar_tudo(guild):
 
         restante = (
             LIMITE_RESTAURACAO
-            - (
-                time.time()
-                - estado["ultimo_ataque"]
-            )
+            - (time.time() - estado["ultimo_ataque"])
         )
 
         if restante > 0:
@@ -817,9 +710,7 @@ async def restaurar_tudo(guild):
 
         estado["restaurando"] = True
 
-        print(
-            f"♻️ Começando restauração COMPLETA em {guild.name}..."
-        )
+        print(f"♻️ Começando restauração COMPLETA em {guild.name}...")
 
         backup = carregar_backup(guild.id)
 
@@ -829,34 +720,24 @@ async def restaurar_tudo(guild):
         erros_permissao = 0
 
         if not backup["canais"] and not backup["cargos"]:
-            print(
-                "❌ Backup vazio! Restauração cancelada para evitar perda da estrutura."
-            )
-
+            print("❌ Backup vazio! Restauração cancelada.")
             estado["restaurando"] = False
             estado["ativo"] = False
             return
 
-        # O mapa será reconstruído com os novos IDs.
         salvar_mapa_canais(guild.id, {})
-
         estado["canais_criados_pelo_bot"].clear()
 
         # =================================================
         # FASE 1 — APAGAR TODOS OS CANAIS
         # =================================================
 
-        print(
-            "🗑️ Apagando todos os canais do servidor..."
-        )
+        print("🗑️ Apagando todos os canais do servidor...")
 
         canais_existentes = list(guild.channels)
 
         canais_existentes.sort(
-            key=lambda c: isinstance(
-                c,
-                discord.CategoryChannel
-            )
+            key=lambda c: isinstance(c, discord.CategoryChannel)
         )
 
         for canal in canais_existentes:
@@ -868,11 +749,7 @@ async def restaurar_tudo(guild):
                 )
 
                 canais_apagados += 1
-
-                print(
-                    f"🗑️ Apagado: {canal.name}"
-                )
-
+                print(f"🗑️ Apagado: {canal.name}")
                 await asyncio.sleep(0.5)
 
             except discord.NotFound:
@@ -880,27 +757,76 @@ async def restaurar_tudo(guild):
 
             except discord.Forbidden as erro:
                 erros_permissao += 1
-
-                print(
-                    f"Sem permissão para apagar {canal.name}: {erro}"
-                )
+                print(f"Sem permissão para apagar {canal.name}: {erro}")
 
             except discord.HTTPException as erro:
-                print(
-                    f"Erro apagando {canal.name}: {erro}"
-                )
-
+                print(f"Erro apagando {canal.name}: {erro}")
                 await asyncio.sleep(2)
 
         await asyncio.sleep(2)
 
         # =================================================
-        # FASE 2 — RECRIAR CATEGORIAS
+        # FASE 2 — RECRIAR / MAPEAR CARGOS ANTES DOS CANAIS
         # =================================================
 
-        print(
-            "♻️ Recriando categorias do backup..."
-        )
+        print("🎭 Verificando e recriando cargos...")
+
+        mapa_cargos = {}
+
+        cargos_por_nome = {
+            role.name: role
+            for role in guild.roles
+            if role.name != "@everyone"
+        }
+
+        for dados in backup["cargos"]:
+            id_antigo = int(dados.get("id", 0))
+            nome = dados.get("name")
+
+            if not nome:
+                continue
+
+            cargo = guild.get_role(id_antigo)
+
+            if cargo is None:
+                cargo = cargos_por_nome.get(nome)
+
+            if cargo is None:
+                try:
+                    cargo = await guild.create_role(
+                        name=nome,
+                        colour=discord.Colour(dados["color"]),
+                        hoist=dados["hoist"],
+                        mentionable=dados["mentionable"],
+                        permissions=discord.Permissions(
+                            dados["permissions"]
+                        ),
+                        reason="Anti-Nuke: restauração do backup BOM"
+                    )
+
+                    cargos_restaurados += 1
+                    cargos_por_nome[nome] = cargo
+
+                    print(f"🎭 Cargo restaurado: {nome}")
+                    await asyncio.sleep(0.5)
+
+                except discord.Forbidden as erro:
+                    erros_permissao += 1
+                    print(f"Sem permissão para recriar cargo {nome}: {erro}")
+                    continue
+
+                except Exception as erro:
+                    print(f"Erro recriando cargo {nome}: {erro}")
+                    continue
+
+            mapa_cargos[id_antigo] = cargo
+            mapa_cargos[str(id_antigo)] = cargo
+
+        # =================================================
+        # FASE 3 — RECRIAR CATEGORIAS
+        # =================================================
+
+        print("♻️ Recriando categorias do backup...")
 
         mapa_categorias = {}
 
@@ -919,20 +845,16 @@ async def restaurar_tudo(guild):
                 novo = await criar_canal_backup(
                     guild,
                     dados,
-                    mapa_categorias
+                    mapa_categorias,
+                    mapa_cargos
                 )
 
                 canais_restaurados += 1
-
-                print(
-                    f"♻️ Categoria restaurada: {novo.name}"
-                )
-
+                print(f"♻️ Categoria restaurada: {novo.name}")
                 await asyncio.sleep(0.7)
 
             except discord.Forbidden as erro:
                 erros_permissao += 1
-
                 print(
                     f"Sem permissão para criar categoria "
                     f"{dados.get('name')}: {erro}"
@@ -945,32 +867,26 @@ async def restaurar_tudo(guild):
                 )
 
         # =================================================
-        # FASE 3 — RECRIAR OS DEMAIS CANAIS
+        # FASE 4 — RECRIAR OS DEMAIS CANAIS
         # =================================================
 
-        print(
-            "♻️ Recriando canais do backup..."
-        )
+        print("♻️ Recriando canais do backup...")
 
         for dados in demais:
             try:
                 novo = await criar_canal_backup(
                     guild,
                     dados,
-                    mapa_categorias
+                    mapa_categorias,
+                    mapa_cargos
                 )
 
                 canais_restaurados += 1
-
-                print(
-                    f"♻️ Canal restaurado: {novo.name}"
-                )
-
+                print(f"♻️ Canal restaurado: {novo.name}")
                 await asyncio.sleep(0.7)
 
             except discord.Forbidden as erro:
                 erros_permissao += 1
-
                 print(
                     f"Sem permissão para recriar "
                     f"{dados.get('name')}: {erro}"
@@ -983,19 +899,15 @@ async def restaurar_tudo(guild):
                 )
 
         # =================================================
-        # FASE 4 — VARREDURA DE CANAIS EXTRAS
+        # FASE 5 — VARREDURA DE CANAIS EXTRAS
         # =================================================
 
-        print(
-            "🔎 Verificando canais que sobraram..."
-        )
+        print("🔎 Verificando canais que sobraram...")
 
         for rodada in range(5):
             await asyncio.sleep(2)
 
-            ids_do_bot = set(
-                estado["canais_criados_pelo_bot"]
-            )
+            ids_do_bot = set(estado["canais_criados_pelo_bot"])
 
             canais_sobrando = [
                 canal
@@ -1004,9 +916,7 @@ async def restaurar_tudo(guild):
             ]
 
             if not canais_sobrando:
-                print(
-                    "✅ Nenhum canal extra encontrado."
-                )
+                print("✅ Nenhum canal extra encontrado.")
                 break
 
             print(
@@ -1023,11 +933,7 @@ async def restaurar_tudo(guild):
                     )
 
                     canais_apagados += 1
-
-                    print(
-                        f"🗑️ Canal extra removido: {canal.name}"
-                    )
-
+                    print(f"🗑️ Canal extra removido: {canal.name}")
                     await asyncio.sleep(0.5)
 
                 except discord.NotFound:
@@ -1035,68 +941,11 @@ async def restaurar_tudo(guild):
 
                 except discord.Forbidden as erro:
                     erros_permissao += 1
-
-                    print(
-                        f"Sem permissão para remover canal extra: {erro}"
-                    )
+                    print(f"Sem permissão para remover canal extra: {erro}")
 
                 except discord.HTTPException as erro:
-                    print(
-                        f"Erro na varredura: {erro}"
-                    )
-
+                    print(f"Erro na varredura: {erro}")
                     await asyncio.sleep(2)
-
-        # =================================================
-        # FASE 5 — RECRIAR CARGOS AUSENTES
-        # =================================================
-
-        print(
-            "🎭 Verificando cargos..."
-        )
-
-        cargos_atuais = {
-            role.name for role in guild.roles
-        }
-
-        for dados in backup["cargos"]:
-            if dados.get("name") in cargos_atuais:
-                continue
-
-            try:
-                cargo = await guild.create_role(
-                    name=dados["name"],
-                    colour=discord.Colour(
-                        dados["color"]
-                    ),
-                    hoist=dados["hoist"],
-                    mentionable=dados["mentionable"],
-                    permissions=discord.Permissions(
-                        dados["permissions"]
-                    ),
-                    reason=(
-                        "Anti-Nuke: restauração do backup BOM"
-                    )
-                )
-
-                cargos_restaurados += 1
-                cargos_atuais.add(cargo.name)
-
-                await asyncio.sleep(0.5)
-
-            except discord.Forbidden as erro:
-                erros_permissao += 1
-
-                print(
-                    f"Sem permissão para recriar cargo "
-                    f"{dados['name']}: {erro}"
-                )
-
-            except Exception as erro:
-                print(
-                    f"Erro recriando cargo "
-                    f"{dados['name']}: {erro}"
-                )
 
         # =================================================
         # FASE 6 — VERIFICAR SE A RAID CONTINUA
@@ -1135,43 +984,27 @@ async def restaurar_tudo(guild):
                     timestamp=discord.utils.utcnow()
                 )
 
-                embed.set_footer(
-                    text=f"Servidor: {guild.name}"
-                )
-
-                await canal_logs.send(
-                    embed=embed
-                )
+                embed.set_footer(text=f"Servidor: {guild.name}")
+                await canal_logs.send(embed=embed)
 
         except Exception as erro:
-            print(
-                f"Erro enviando relatório: {erro}"
-            )
+            print(f"Erro enviando relatório: {erro}")
 
         # =================================================
         # FINALIZAR RAID
         # =================================================
 
         raid_state[guild.id] = novo_estado_raid()
-
         raid_state[guild.id]["ultimo_ataque"] = time.time()
 
         try:
             foto_limpa = tirar_foto_guild(guild)
-
-            salvar_backup_temp(
-                guild.id,
-                foto_limpa
-            )
+            salvar_backup_temp(guild.id, foto_limpa)
 
         except Exception as erro:
-            print(
-                f"Erro atualizando backup TEMP: {erro}"
-            )
+            print(f"Erro atualizando backup TEMP: {erro}")
 
-        print(
-            f"✅ Restauração completa finalizada em {guild.name}"
-        )
+        print(f"✅ Restauração completa finalizada em {guild.name}")
 
 
 # =========================================================
@@ -1186,7 +1019,6 @@ async def punir(guild, executor_id, motivo):
         return False
 
     estado = get_raid(guild.id)
-
     primeiro_acionamento = not estado["ativo"]
 
     estado["ativo"] = True
@@ -1210,18 +1042,11 @@ async def punir(guild, executor_id, motivo):
     ):
         try:
             membro = guild.get_member(executor_id)
-
-            usuario = (
-                membro
-                or await bot.fetch_user(executor_id)
-            )
-
+            usuario = membro or await bot.fetch_user(executor_id)
             estado["raider_nome"] = str(usuario)
 
         except Exception:
-            estado["raider_nome"] = (
-                f"ID {executor_id}"
-            )
+            estado["raider_nome"] = f"ID {executor_id}"
 
     agendar_recuperacao(guild)
 
@@ -1238,14 +1063,9 @@ async def punir(guild, executor_id, motivo):
 
         if membro is None:
             try:
-                membro = await guild.fetch_member(
-                    executor_id
-                )
-
+                membro = await guild.fetch_member(executor_id)
             except discord.NotFound:
-                membro = await bot.fetch_user(
-                    executor_id
-                )
+                membro = await bot.fetch_user(executor_id)
 
         await guild.ban(
             membro,
@@ -1254,15 +1074,12 @@ async def punir(guild, executor_id, motivo):
 
         ja_banidos[executor_id] = agora
 
-        print(
-            f"🚨 Banido: {membro} - {motivo}"
-        )
+        print(f"🚨 Banido: {membro} - {motivo}")
 
         await enviar_log(
             guild,
             "🚨 Banido - Anti-Nuke",
-            f"**Executor:** <@{executor_id}> "
-            f"(`{executor_id}`)\n"
+            f"**Executor:** <@{executor_id}> (`{executor_id}`)\n"
             f"**Motivo:** {motivo}",
             cor=0xE74C3C
         )
@@ -1276,9 +1093,7 @@ async def punir(guild, executor_id, motivo):
         )
 
     except Exception as erro:
-        print(
-            f"Erro ao punir {executor_id}: {erro}"
-        )
+        print(f"Erro ao punir {executor_id}: {erro}")
 
     return False
 
@@ -1291,68 +1106,46 @@ async def punir(guild, executor_id, motivo):
 async def on_ready():
     global VIEWS_REGISTRADAS
 
-    print(
-        f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO"
-    )
+    print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO")
 
     await bot.change_presence(
-        activity=discord.Game(
-            name="🛡️ SYSTEM PROTECTING"
-        )
+        activity=discord.Game(name="🛡️ SYSTEM PROTECTING")
     )
 
-    # Registra os botões persistentes dos tickets.
     if not VIEWS_REGISTRADAS:
         bot.add_view(TicketPanelView())
         bot.add_view(TicketCloseView())
-
         VIEWS_REGISTRADAS = True
 
     for guild in bot.guilds:
         try:
-            if not os.path.exists(
-                backup_bom_path(guild.id)
-            ):
+            if not os.path.exists(backup_bom_path(guild.id)):
                 foto = tirar_foto_guild(guild)
 
-                salvar_backup_bom(
-                    guild.id,
-                    foto
-                )
+                salvar_backup_bom(guild.id, foto)
+                salvar_backup_temp(guild.id, foto)
 
-                salvar_backup_temp(
-                    guild.id,
-                    foto
-                )
+                print(f"📸 Backup inicial criado: {guild.name}")
 
-                print(
-                    f"📸 Backup inicial criado: {guild.name}"
-                )
-
-            elif not os.path.exists(
-                backup_temp_path(guild.id)
-            ):
+            elif not os.path.exists(backup_temp_path(guild.id)):
                 salvar_backup_temp(
                     guild.id,
                     tirar_foto_guild(guild)
                 )
 
-                print(
-                    f"📂 Backup TEMP criado: {guild.name}"
-                )
+                print(f"📂 Backup TEMP criado: {guild.name}")
 
             else:
-                print(
-                    f"📂 Backup BOM carregado: {guild.name}"
-                )
+                print(f"📂 Backup BOM carregado: {guild.name}")
 
         except Exception as erro:
-            print(
-                f"Erro backup inicial {guild.name}: {erro}"
-            )
+            print(f"Erro backup inicial {guild.name}: {erro}")
 
     if not sync_backup_loop.is_running():
         sync_backup_loop.start()
+
+    if not verificar_tickets_sem_resposta.is_running():
+        verificar_tickets_sem_resposta.start()
 
 
 @bot.event
@@ -1360,24 +1153,426 @@ async def on_guild_join(guild):
     try:
         foto = tirar_foto_guild(guild)
 
-        salvar_backup_bom(
-            guild.id,
-            foto
-        )
+        salvar_backup_bom(guild.id, foto)
+        salvar_backup_temp(guild.id, foto)
 
-        salvar_backup_temp(
-            guild.id,
-            foto
-        )
-
-        print(
-            f"📸 Novo servidor, backup criado: {guild.name}"
-        )
+        print(f"📸 Novo servidor, backup criado: {guild.name}")
 
     except Exception as erro:
-        print(
-            f"Erro criando backup do novo servidor: {erro}"
+        print(f"Erro criando backup do novo servidor: {erro}")
+
+
+# =========================================================
+# SISTEMA DE TICKETS — DADOS
+# =========================================================
+
+def arquivo_contador_ticket(guild_id):
+    return f"contador_tickets_{guild_id}.json"
+
+
+def carregar_contador_ticket(guild_id):
+    path = arquivo_contador_ticket(guild_id)
+
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+                return int(dados.get("contador", 0))
+    except Exception as erro:
+        print(f"Erro lendo contador de tickets: {erro}")
+
+    return 0
+
+
+def salvar_contador_ticket(guild_id, numero):
+    path = arquivo_contador_ticket(guild_id)
+    temporario = path + ".tmp"
+
+    try:
+        with open(temporario, "w", encoding="utf-8") as f:
+            json.dump({"contador": numero}, f)
+
+        os.replace(temporario, path)
+        return True
+
+    except Exception as erro:
+        print(f"Erro salvando contador de tickets: {erro}")
+        return False
+
+
+async def proximo_numero_ticket(guild_id):
+    async with locks_tickets[guild_id]:
+        numero = carregar_contador_ticket(guild_id) + 1
+        salvar_contador_ticket(guild_id, numero)
+        return numero
+
+
+def ler_dados_ticket(canal):
+    """
+    Lê os dados do ticket pelo topic.
+    Também aceita o formato antigo ticket_owner:ID.
+    """
+
+    topic = getattr(canal, "topic", None) or ""
+
+    dados = {
+        "owner_id": None,
+        "numero": None,
+        "aberto_em": None,
+        "alertado": False,
+        "respondido": False
+    }
+
+    if not topic:
+        return dados
+
+    partes = topic.split("|")
+
+    for parte in partes:
+        if ":" not in parte:
+            continue
+
+        chave, valor = parte.split(":", 1)
+
+        try:
+            if chave == "ticket_owner":
+                dados["owner_id"] = int(valor)
+
+            elif chave == "ticket_numero":
+                dados["numero"] = int(valor)
+
+            elif chave == "ticket_aberto":
+                dados["aberto_em"] = int(valor)
+
+            elif chave == "ticket_alertado":
+                dados["alertado"] = valor == "1"
+
+            elif chave == "ticket_respondido":
+                dados["respondido"] = valor == "1"
+
+        except (ValueError, TypeError):
+            pass
+
+    return dados
+
+
+async def atualizar_dados_ticket(canal, **alteracoes):
+    dados = ler_dados_ticket(canal)
+
+    dados.update(alteracoes)
+
+    partes = [
+        f"ticket_owner:{dados['owner_id']}",
+        f"ticket_numero:{dados['numero']}",
+        f"ticket_aberto:{dados['aberto_em']}",
+        f"ticket_alertado:{1 if dados['alertado'] else 0}",
+        f"ticket_respondido:{1 if dados['respondido'] else 0}"
+    ]
+
+    try:
+        await canal.edit(topic="|".join(partes))
+        return True
+
+    except Exception as erro:
+        print(f"Erro atualizando dados do ticket: {erro}")
+        return False
+
+
+def eh_responsavel_ticket(guild, membro):
+    if guild is None or membro is None:
+        return False
+
+    if membro.id == guild.owner_id:
+        return True
+
+    if membro.id in ADM_CONFIANCA:
+        return True
+
+    permissoes = membro.guild_permissions
+
+    if permissoes.administrator or permissoes.manage_channels:
+        return True
+
+    return False
+
+
+def obter_responsaveis_ticket(guild):
+    responsaveis = {}
+
+    dono = guild.get_member(guild.owner_id)
+
+    if dono:
+        responsaveis[dono.id] = dono
+
+    for membro in guild.members:
+        if eh_responsavel_ticket(guild, membro):
+            responsaveis[membro.id] = membro
+
+    for user_id in ADM_CONFIANCA:
+        try:
+            membro = guild.get_member(user_id)
+
+            if membro:
+                responsaveis[membro.id] = membro
+        except Exception:
+            pass
+
+    return list(responsaveis.values())
+
+
+# =========================================================
+# TRANSCRIÇÃO E FECHAMENTO
+# =========================================================
+
+async def gerar_transcricao(canal):
+    dados = ler_dados_ticket(canal)
+
+    mensagens = []
+
+    async for mensagem in canal.history(
+        limit=None,
+        oldest_first=True
+    ):
+        data = mensagem.created_at.strftime("%d/%m/%Y %H:%M:%S")
+
+        conteudo = mensagem.content or ""
+
+        if mensagem.embeds:
+            conteudo += " [Mensagem com embed]"
+
+        if mensagem.attachments:
+            anexos = "\n".join(
+                f"Anexo: {anexo.url}"
+                for anexo in mensagem.attachments
+            )
+
+            conteudo += "\n" + anexos
+
+        if mensagem.stickers:
+            conteudo += "\n[Sticker enviado]"
+
+        if not conteudo.strip():
+            conteudo = "[Mensagem sem texto]"
+
+        mensagens.append(
+            f"[{data}] {mensagem.author} "
+            f"(ID: {mensagem.author.id}):\n{conteudo}\n"
         )
+
+    inicio = dados.get("aberto_em")
+
+    if inicio:
+        data_inicio = datetime.fromtimestamp(
+            inicio,
+            timezone.utc
+        )
+
+        duracao = max(0, int(time.time() - inicio))
+
+        horas, resto = divmod(duracao, 3600)
+        minutos, segundos = divmod(resto, 60)
+
+        tempo_aberto = (
+            f"{horas}h {minutos}min {segundos}s"
+        )
+
+        data_formatada = data_inicio.strftime("%d/%m/%Y %H:%M:%S")
+    else:
+        tempo_aberto = "Não registrado"
+        data_formatada = "Não registrado"
+
+    conteudo_final = (
+        f"TRANSCRIÇÃO DO TICKET\n"
+        f"Servidor: {canal.guild.name}\n"
+        f"Canal: {canal.name}\n"
+        f"Número: {dados.get('numero') or 'Não registrado'}\n"
+        f"Responsável pela abertura: {dados.get('owner_id')}\n"
+        f"Data de abertura: {data_formatada}\n"
+        f"Tempo aberto: {tempo_aberto}\n"
+        f"{'=' * 60}\n\n"
+    )
+
+    conteudo_final += "\n".join(mensagens)
+
+    arquivo = io.BytesIO(
+        conteudo_final.encode("utf-8")
+    )
+
+    numero = dados.get("numero") or "ticket"
+
+    return discord.File(
+        arquivo,
+        filename=f"transcricao-ticket-{numero}.txt"
+    )
+
+
+async def fechar_ticket(canal, fechado_por):
+    if not isinstance(canal, discord.TextChannel):
+        return False
+
+    dados = ler_dados_ticket(canal)
+    guild = canal.guild
+
+    if dados["owner_id"] is None:
+        return False
+
+    arquivo = None
+
+    try:
+        arquivo = await gerar_transcricao(canal)
+
+    except Exception as erro:
+        print(f"Erro gerando transcrição: {erro}")
+
+    destinatarios = set()
+
+    if guild.owner_id:
+        destinatarios.add(guild.owner_id)
+
+    destinatarios.add(dados["owner_id"])
+
+    enviados = 0
+
+    if arquivo:
+        for user_id in destinatarios:
+            try:
+                usuario = await bot.fetch_user(user_id)
+
+                arquivo.fp.seek(0)
+
+                await usuario.send(
+                    content=(
+                        f"📄 **Transcrição do ticket "
+                        f"#{dados.get('numero') or 'sem número'}**\n"
+                        f"Servidor: **{guild.name}**\n"
+                        f"Fechado por: **{fechado_por}**"
+                    ),
+                    file=discord.File(
+                        arquivo.fp,
+                        filename=arquivo.filename
+                    )
+                )
+
+                enviados += 1
+
+            except Exception as erro:
+                print(
+                    f"Não foi possível enviar transcrição "
+                    f"para {user_id}: {erro}"
+                )
+
+    try:
+        await canal.delete(
+            reason=f"Ticket fechado por {fechado_por}"
+        )
+
+        return True
+
+    except Exception as erro:
+        print(f"Erro excluindo ticket: {erro}")
+        return False
+
+
+# =========================================================
+# ALERTA DE TICKET SEM RESPOSTA
+# =========================================================
+
+async def notificar_responsaveis_ticket(canal, dados):
+    guild = canal.guild
+
+    responsaveis = obter_responsaveis_ticket(guild)
+
+    mensagem = (
+        "🎫 **Ticket aguardando atendimento**\n"
+        f"Servidor: **{guild.name}**\n"
+        f"Ticket: **{canal.name}**\n"
+        f"Autor: <@{dados['owner_id']}>\n"
+        f"Canal: {canal.mention}\n\n"
+        "Este ticket está aberto há 30 minutos "
+        "e ainda não recebeu resposta de um responsável."
+    )
+
+    enviados = 0
+
+    for responsavel in responsaveis:
+        try:
+            await responsavel.send(mensagem)
+            enviados += 1
+            await asyncio.sleep(0.3)
+
+        except Exception:
+            pass
+
+    return enviados
+
+
+@tasks.loop(minutes=1)
+async def verificar_tickets_sem_resposta():
+    for guild in bot.guilds:
+        for canal in list(guild.text_channels):
+            try:
+                dados = ler_dados_ticket(canal)
+
+                if not dados["owner_id"]:
+                    continue
+
+                if dados["respondido"] or dados["alertado"]:
+                    continue
+
+                aberto_em = dados["aberto_em"]
+
+                if not aberto_em:
+                    continue
+
+                tempo_aberto = time.time() - aberto_em
+
+                if tempo_aberto < TEMPO_ALERTA_TICKET:
+                    continue
+
+                # Marca como alertado antes das notificações,
+                # evitando mandar várias vezes.
+                await atualizar_dados_ticket(
+                    canal,
+                    alertado=True
+                )
+
+                enviados = await notificar_responsaveis_ticket(
+                    canal,
+                    dados
+                )
+
+                try:
+                    await canal.send(
+                        content=(
+                            f"<@{dados['owner_id']}> ⏰\n\n"
+                            "Seu ticket está aberto há **30 minutos** "
+                            "e ainda não recebeu uma resposta da equipe.\n\n"
+                            "Enviamos uma mensagem no privado dos "
+                            "administradores e responsáveis para avisá-los "
+                            "sobre seu atendimento."
+                        ),
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True
+                        )
+                    )
+
+                except Exception as erro:
+                    print(f"Erro avisando autor do ticket: {erro}")
+
+                print(
+                    f"⏰ Alerta de ticket enviado: {canal.name} "
+                    f"| Responsáveis notificados: {enviados}"
+                )
+
+            except Exception as erro:
+                print(
+                    f"Erro verificando ticket {canal.name}: {erro}"
+                )
+
+
+@verificar_tickets_sem_resposta.before_loop
+async def antes_verificar_tickets():
+    await bot.wait_until_ready()
 
 
 # =========================================================
@@ -1398,29 +1593,82 @@ async def on_message(message):
         mensagens_processadas.clear()
 
     # =====================================================
+    # IDENTIFICAR RESPOSTA DE RESPONSÁVEL NO TICKET
+    # =====================================================
+
+    dados_ticket = ler_dados_ticket(message.channel)
+
+    if (
+        dados_ticket["owner_id"]
+        and eh_responsavel_ticket(
+            message.guild,
+            message.author
+        )
+    ):
+        if not dados_ticket["respondido"]:
+            await atualizar_dados_ticket(
+                message.channel,
+                respondido=True
+            )
+
+    # =====================================================
+    # COMANDO .f PARA FECHAR TICKET
+    # =====================================================
+
+    if message.content.strip().lower() == ".f":
+        dados = ler_dados_ticket(message.channel)
+
+        if not dados["owner_id"]:
+            return
+
+        if not eh_responsavel_ticket(
+            message.guild,
+            message.author
+        ):
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            return
+
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        await message.channel.send(
+            f"🔒 Ticket fechado por {message.author.mention}. "
+            "Estou enviando a transcrição no privado..."
+        )
+
+        await asyncio.sleep(2)
+
+        await fechar_ticket(
+            message.channel,
+            message.author
+        )
+
+        return
+
+    # =====================================================
     # CONTROLE DE COMANDOS
     # =====================================================
 
     if message.content.startswith("!"):
         ctx = await bot.get_context(message)
 
-        # Apaga a mensagem de comando.
         try:
             await message.delete()
         except discord.HTTPException:
             pass
 
-        # Comando inexistente: ignora silenciosamente.
         if ctx.command is None:
             return
 
-        # !recursos é liberado para todos.
         if ctx.command.qualified_name == "recursos":
             await bot.invoke(ctx)
             return
 
-        # Todos os outros comandos são exclusivos
-        # do dono daquele servidor.
         if message.author.id != message.guild.owner_id:
             return
 
@@ -1436,14 +1684,8 @@ async def on_message(message):
         SOLO_DONO_CHANNEL_ID
     )
 
-    if (
-        canal_dono
-        and message.channel.id == canal_dono.id
-    ):
-        if not is_protegido(
-            message.guild,
-            message.author.id
-        ):
+    if canal_dono and message.channel.id == canal_dono.id:
+        if not is_protegido(message.guild, message.author.id):
             try:
                 await message.delete()
             except discord.HTTPException:
@@ -1460,10 +1702,7 @@ async def on_message(message):
         LOGS_CHANNEL_ID
     )
 
-    if (
-        canal_logs
-        and message.channel.id == canal_logs.id
-    ):
+    if canal_logs and message.channel.id == canal_logs.id:
         try:
             await message.delete()
         except discord.HTTPException:
@@ -1495,9 +1734,7 @@ async def on_message(message):
         try:
             await message.author.timeout(
                 timedelta(minutes=10),
-                reason=(
-                    "Anti-Spam: 5 mensagens em 3 segundos"
-                )
+                reason="Anti-Spam: 5 mensagens em 3 segundos"
             )
 
             await enviar_log(
@@ -1517,9 +1754,7 @@ async def on_message(message):
             )
 
         except Exception as erro:
-            print(
-                f"Erro no anti-spam: {erro}"
-            )
+            print(f"Erro no anti-spam: {erro}")
 
         return
 
@@ -1536,12 +1771,7 @@ async def on_member_ban(guild, user):
         user.id
     )
 
-    if executor and registrou(
-        "ban",
-        executor,
-        2,
-        3
-    ):
+    if executor and registrou("ban", executor, 2, 3):
         await punir(
             guild,
             executor,
@@ -1557,12 +1787,7 @@ async def on_member_remove(member):
         member.id
     )
 
-    if executor and registrou(
-        "kick",
-        executor,
-        2,
-        3
-    ):
+    if executor and registrou("kick", executor, 2, 3):
         await punir(
             member.guild,
             executor,
@@ -1595,13 +1820,9 @@ async def on_guild_channel_create(channel):
         if is_protegido(guild, executor):
             return
 
-        estado["canais_raid_criados"].add(
-            channel.id
-        )
-
+        estado["canais_raid_criados"].add(channel.id)
         estado["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
-
         return
 
     if estado["ativo"]:
@@ -1616,10 +1837,7 @@ async def on_guild_channel_create(channel):
                 (guild.id, executor)
             ].add(channel.id)
 
-        estado["canais_raid_criados"].add(
-            channel.id
-        )
-
+        estado["canais_raid_criados"].add(channel.id)
         estado["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
 
@@ -1632,20 +1850,12 @@ async def on_guild_channel_create(channel):
 
         return
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
+    if executor and not is_protegido(guild, executor):
         canais_pendentes_por_executor[
             (guild.id, executor)
         ].add(channel.id)
 
-        if registrou(
-            "canal_criar",
-            executor,
-            2,
-            3
-        ):
+        if registrou("canal_criar", executor, 2, 3):
             await punir(
                 guild,
                 executor,
@@ -1654,20 +1864,11 @@ async def on_guild_channel_create(channel):
 
         return
 
-    if executor and is_protegido(
-        guild,
-        executor
-    ):
+    if executor and is_protegido(guild, executor):
         try:
-            atualizar_canal_no_backup_temp(
-                guild.id,
-                channel
-            )
-
+            atualizar_canal_no_backup_temp(guild.id, channel)
         except Exception as erro:
-            print(
-                f"Erro atualizando TEMP: {erro}"
-            )
+            print(f"Erro atualizando TEMP: {erro}")
 
 
 # =========================================================
@@ -1693,25 +1894,15 @@ async def on_guild_channel_delete(channel):
             return
 
     if estado["ativo"]:
-        estado["canais_apagados_ids"].add(
-            channel.id
-        )
+        estado["canais_apagados_ids"].add(channel.id)
 
         if executor is not None:
             if bot.user and executor == bot.user.id:
                 return
 
-            if not is_protegido(
-                guild,
-                executor
-            ):
+            if not is_protegido(guild, executor):
                 if executor == estado["raider_id"]:
-                    if registrou(
-                        "canal_del",
-                        executor,
-                        2,
-                        3
-                    ):
+                    if registrou("canal_del", executor, 2, 3):
                         await punir(
                             guild,
                             executor,
@@ -1720,19 +1911,10 @@ async def on_guild_channel_delete(channel):
 
         estado["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
-
         return
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
-        if registrou(
-            "canal_del",
-            executor,
-            2,
-            3
-        ):
+    if executor and not is_protegido(guild, executor):
+        if registrou("canal_del", executor, 2, 3):
             await punir(
                 guild,
                 executor,
@@ -1741,11 +1923,7 @@ async def on_guild_channel_delete(channel):
 
         if get_raid(guild.id)["ativo"]:
             estado = get_raid(guild.id)
-
-            estado["canais_apagados_ids"].add(
-                channel.id
-            )
-
+            estado["canais_apagados_ids"].add(channel.id)
             agendar_recuperacao(guild)
             return
 
@@ -1753,10 +1931,7 @@ async def on_guild_channel_delete(channel):
             categoria = channel.category
             overwrites = channel.overwrites
 
-            if isinstance(
-                channel,
-                discord.TextChannel
-            ):
+            if isinstance(channel, discord.TextChannel):
                 novo = await guild.create_text_channel(
                     name=channel.name,
                     category=categoria,
@@ -1768,10 +1943,7 @@ async def on_guild_channel_delete(channel):
                     reason="BACKUP Anti-Nuke"
                 )
 
-            elif isinstance(
-                channel,
-                discord.VoiceChannel
-            ):
+            elif isinstance(channel, discord.VoiceChannel):
                 novo = await guild.create_voice_channel(
                     name=channel.name,
                     category=categoria,
@@ -1782,10 +1954,7 @@ async def on_guild_channel_delete(channel):
                     reason="BACKUP Anti-Nuke"
                 )
 
-            elif isinstance(
-                channel,
-                discord.CategoryChannel
-            ):
+            elif isinstance(channel, discord.CategoryChannel):
                 novo = await guild.create_category(
                     name=channel.name,
                     position=channel.position,
@@ -1805,28 +1974,19 @@ async def on_guild_channel_delete(channel):
                     guild,
                     "♻️ Backup - Canal Recriado",
                     f"**Canal:** #{channel.name}\n"
-                    f"**Deletado por:** <@{executor}> "
-                    f"(`{executor}`)\n"
+                    f"**Deletado por:** <@{executor}> (`{executor}`)\n"
                     "**Ação:** Canal recriado automaticamente",
                     cor=0x2ECC71
                 )
 
         except Exception as erro:
-            print(
-                f"Erro backup canal: {erro}"
-            )
+            print(f"Erro backup canal: {erro}")
 
     else:
         try:
-            remover_canal_do_backup_temp(
-                guild.id,
-                channel.id
-            )
-
+            remover_canal_do_backup_temp(guild.id, channel.id)
         except Exception as erro:
-            print(
-                f"Erro removendo canal do TEMP: {erro}"
-            )
+            print(f"Erro removendo canal do TEMP: {erro}")
 
 
 # =========================================================
@@ -1834,10 +1994,7 @@ async def on_guild_channel_delete(channel):
 # =========================================================
 
 @bot.event
-async def on_guild_channel_update(
-    antes,
-    depois
-):
+async def on_guild_channel_update(antes, depois):
     guild = depois.guild
 
     executor = await pegar_executor(
@@ -1846,16 +2003,8 @@ async def on_guild_channel_update(
         depois.id
     )
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
-        if registrou(
-            "canal_update",
-            executor,
-            2,
-            3
-        ):
+    if executor and not is_protegido(guild, executor):
+        if registrou("canal_update", executor, 2, 3):
             await punir(
                 guild,
                 executor,
@@ -1867,20 +2016,11 @@ async def on_guild_channel_update(
 
         return
 
-    if executor and is_protegido(
-        guild,
-        executor
-    ):
+    if executor and is_protegido(guild, executor):
         try:
-            atualizar_canal_no_backup_temp(
-                guild.id,
-                depois
-            )
-
+            atualizar_canal_no_backup_temp(guild.id, depois)
         except Exception as erro:
-            print(
-                f"Erro atualizando TEMP de canal: {erro}"
-            )
+            print(f"Erro atualizando TEMP de canal: {erro}")
 
 
 # =========================================================
@@ -1898,20 +2038,15 @@ async def on_guild_role_create(role):
         role.id
     )
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
+    if executor and bot.user and executor == bot.user.id:
+        return
+
+    if executor and not is_protegido(guild, executor):
         if estado["ativo"]:
             estado["ultimo_ataque"] = time.time()
             agendar_recuperacao(guild)
 
-        elif registrou(
-            "cargo_criar",
-            executor,
-            2,
-            3
-        ):
+        elif registrou("cargo_criar", executor, 2, 3):
             await punir(
                 guild,
                 executor,
@@ -1920,32 +2055,16 @@ async def on_guild_role_create(role):
 
         return
 
-    if executor and is_protegido(
-        guild,
-        executor
-    ):
+    if executor and is_protegido(guild, executor):
         try:
-            dados = carregar_backup_temp(
-                guild.id
-            )
+            dados = carregar_backup_temp(guild.id)
 
-            if not any(
-                x.get("id") == role.id
-                for x in dados["cargos"]
-            ):
-                dados["cargos"].append(
-                    snapshot_cargo(role)
-                )
-
-                salvar_backup_temp(
-                    guild.id,
-                    dados
-                )
+            if not any(x.get("id") == role.id for x in dados["cargos"]):
+                dados["cargos"].append(snapshot_cargo(role))
+                salvar_backup_temp(guild.id, dados)
 
         except Exception as erro:
-            print(
-                f"Erro atualizando TEMP de cargo: {erro}"
-            )
+            print(f"Erro atualizando TEMP de cargo: {erro}")
 
 
 @bot.event
@@ -1961,25 +2080,16 @@ async def on_guild_role_delete(role):
     estado = get_raid(guild.id)
 
     if estado["ativo"]:
-        estado["cargos_apagados"].append(
-            role.name
-        )
-
+        estado["cargos_apagados"].append(role.name)
         estado["ultimo_ataque"] = time.time()
         agendar_recuperacao(guild)
-
         return
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
-        if registrou(
-            "cargo_del",
-            executor,
-            2,
-            3
-        ):
+    if executor and bot.user and executor == bot.user.id:
+        return
+
+    if executor and not is_protegido(guild, executor):
+        if registrou("cargo_del", executor, 2, 3):
             await punir(
                 guild,
                 executor,
@@ -2000,45 +2110,30 @@ async def on_guild_role_delete(role):
                 reason="BACKUP Anti-Nuke"
             )
 
-            print(
-                f"♻️ BACKUP: Cargo {role.name} recriado!"
-            )
+            print(f"♻️ BACKUP: Cargo {role.name} recriado!")
 
         except Exception as erro:
-            print(
-                f"Erro backup cargo: {erro}"
-            )
+            print(f"Erro backup cargo: {erro}")
 
     else:
         try:
-            dados = carregar_backup_temp(
-                guild.id
-            )
+            dados = carregar_backup_temp(guild.id)
 
             dados["cargos"] = [
                 x for x in dados["cargos"]
                 if x.get("id") != role.id
             ]
 
-            salvar_backup_temp(
-                guild.id,
-                dados
-            )
+            salvar_backup_temp(guild.id, dados)
 
         except Exception as erro:
-            print(
-                f"Erro removendo cargo do TEMP: {erro}"
-            )
+            print(f"Erro removendo cargo do TEMP: {erro}")
 
 
 @bot.event
-async def on_guild_role_update(
-    antes,
-    depois
-):
+async def on_guild_role_update(antes, depois):
     mudou_permissoes = (
-        antes.permissions.value
-        != depois.permissions.value
+        antes.permissions.value != depois.permissions.value
     )
 
     if not mudou_permissoes:
@@ -2050,16 +2145,12 @@ async def on_guild_role_update(
         depois.id
     )
 
-    if executor and not is_protegido(
-        depois.guild,
-        executor
-    ):
+    if executor and not is_protegido(depois.guild, executor):
         if (
             depois.permissions.administrator
             and not antes.permissions.administrator
         ):
             motivo = "Tentou dar ADM via cargo"
-
         else:
             motivo = "Alterou permissões de cargo"
 
@@ -2072,11 +2163,7 @@ async def on_guild_role_update(
             cor=0xFFA500
         )
 
-        await punir(
-            depois.guild,
-            executor,
-            motivo
-        )
+        await punir(depois.guild, executor, motivo)
 
 
 # =========================================================
@@ -2092,26 +2179,18 @@ async def on_webhooks_update(channel):
         discord.AuditLogAction.webhook_create
     )
 
-    if executor and not is_protegido(
-        guild,
-        executor
-    ):
+    if executor and not is_protegido(guild, executor):
         try:
             webhooks = await channel.webhooks()
 
             for webhook in webhooks:
-                if (
-                    webhook.user
-                    and webhook.user.id == executor
-                ):
+                if webhook.user and webhook.user.id == executor:
                     await webhook.delete(
                         reason="Anti-Nuke: webhook suspeito"
                     )
 
         except Exception as erro:
-            print(
-                f"Erro removendo webhook: {erro}"
-            )
+            print(f"Erro removendo webhook: {erro}")
 
         await punir(
             guild,
@@ -2125,11 +2204,7 @@ async def on_webhooks_update(channel):
 # =========================================================
 
 @bot.event
-async def on_guild_emojis_update(
-    guild,
-    antes,
-    depois
-):
+async def on_guild_emojis_update(guild, antes, depois):
     if len(depois) < len(antes):
         executor = await pegar_executor(
             guild,
@@ -2139,12 +2214,7 @@ async def on_guild_emojis_update(
         if (
             executor
             and not is_protegido(guild, executor)
-            and registrou(
-                "emoji",
-                executor,
-                2,
-                3
-            )
+            and registrou("emoji", executor, 2, 3)
         ):
             await punir(
                 guild,
@@ -2154,21 +2224,14 @@ async def on_guild_emojis_update(
 
 
 @bot.event
-async def on_guild_stickers_update(
-    guild,
-    antes,
-    depois
-):
+async def on_guild_stickers_update(guild, antes, depois):
     if len(depois) < len(antes):
         executor = await pegar_executor(
             guild,
             discord.AuditLogAction.sticker_delete
         )
 
-        if (
-            executor
-            and not is_protegido(guild, executor)
-        ):
+        if executor and not is_protegido(guild, executor):
             await punir(
                 guild,
                 executor,
@@ -2185,9 +2248,7 @@ async def on_raw_bulk_message_delete(payload):
     if payload.guild_id is None:
         return
 
-    guild = bot.get_guild(
-        payload.guild_id
-    )
+    guild = bot.get_guild(payload.guild_id)
 
     if guild is None:
         return
@@ -2197,10 +2258,7 @@ async def on_raw_bulk_message_delete(payload):
         discord.AuditLogAction.message_bulk_delete
     )
 
-    if (
-        executor
-        and not is_protegido(guild, executor)
-    ):
+    if executor and not is_protegido(guild, executor):
         await punir(
             guild,
             executor,
@@ -2213,10 +2271,7 @@ async def on_raw_bulk_message_delete(payload):
 # =========================================================
 
 @bot.event
-async def on_guild_update(
-    antes,
-    depois
-):
+async def on_guild_update(antes, depois):
     mudou_nome = antes.name != depois.name
     mudou_icone = antes.icon != depois.icon
 
@@ -2228,10 +2283,7 @@ async def on_guild_update(
         discord.AuditLogAction.guild_update
     )
 
-    if (
-        not executor
-        or is_protegido(depois, executor)
-    ):
+    if not executor or is_protegido(depois, executor):
         return
 
     try:
@@ -2241,9 +2293,7 @@ async def on_guild_update(
             else None
         )
 
-        kwargs = {
-            "name": antes.name
-        }
+        kwargs = {"name": antes.name}
 
         if mudou_icone:
             kwargs["icon"] = icone_bytes
@@ -2254,9 +2304,7 @@ async def on_guild_update(
         )
 
     except Exception as erro:
-        print(
-            f"Erro restaurando nome/ícone: {erro}"
-        )
+        print(f"Erro restaurando nome/ícone: {erro}")
 
     await enviar_log(
         depois,
@@ -2321,7 +2369,8 @@ async def recursos(ctx):
         value=(
             "> Painel para abertura de tickets.\n"
             "> Canais privados de atendimento.\n"
-            "> Opção para fechar tickets."
+            "> Alerta automático após 30 minutos sem resposta.\n"
+            "> Transcrição enviada ao fechar o ticket."
         ),
         inline=False
     )
@@ -2340,30 +2389,16 @@ async def recursos(ctx):
 
 @bot.command(
     name="atualizar",
-    aliases=[
-        "atualizarbackup",
-        "backup",
-        "salvar"
-    ]
+    aliases=["atualizarbackup", "backup", "salvar"]
 )
-async def atualizar_backup(
-    ctx,
-    *,
-    arg: str = ""
-):
+async def atualizar_backup(ctx, *, arg: str = ""):
     if ctx.author.id != ctx.guild.owner_id:
         return
 
-    if ctx.invoked_with in (
-        "backup",
-        "salvar"
-    ):
+    if ctx.invoked_with in ("backup", "salvar"):
         arg = "backup"
 
-    if arg.strip().lower() not in (
-        "backup",
-        ""
-    ):
+    if arg.strip().lower() not in ("backup", ""):
         await ctx.send(
             "Usa assim: `!atualizar backup`",
             delete_after=5
@@ -2381,19 +2416,10 @@ async def atualizar_backup(
         return
 
     try:
-        foto = tirar_foto_guild(
-            ctx.guild
-        )
+        foto = tirar_foto_guild(ctx.guild)
 
-        salvar_backup_bom(
-            ctx.guild.id,
-            foto
-        )
-
-        salvar_backup_temp(
-            ctx.guild.id,
-            foto
-        )
+        salvar_backup_bom(ctx.guild.id, foto)
+        salvar_backup_temp(ctx.guild.id, foto)
 
         await ctx.send(
             f"✅ Backup atualizado! "
@@ -2419,10 +2445,7 @@ async def atualizar_backup(
 # =========================================================
 
 @bot.command(name="limpar")
-async def limpar(
-    ctx,
-    quantidade: int = 0
-):
+async def limpar(ctx, quantidade: int = 0):
     if ctx.author.id != ctx.guild.owner_id:
         return
 
@@ -2437,15 +2460,10 @@ async def limpar(
     restante = quantidade
 
     while restante > 0:
-        lote = min(
-            restante,
-            100
-        )
+        lote = min(restante, 100)
 
         try:
-            deletadas = await ctx.channel.purge(
-                limit=lote
-            )
+            deletadas = await ctx.channel.purge(limit=lote)
 
             apagadas += len(deletadas)
             restante -= lote
@@ -2456,9 +2474,7 @@ async def limpar(
             await asyncio.sleep(0.5)
 
         except Exception as erro:
-            print(
-                f"Erro limpar: {erro}"
-            )
+            print(f"Erro limpar: {erro}")
             break
 
     await ctx.send(
@@ -2468,7 +2484,7 @@ async def limpar(
 
 
 # =========================================================
-# SISTEMA DE TICKETS
+# SISTEMA DE TICKETS — BOTÃO FECHAR
 # =========================================================
 
 class TicketCloseView(discord.ui.View):
@@ -2481,7 +2497,7 @@ class TicketCloseView(discord.ui.View):
         style=discord.ButtonStyle.danger,
         custom_id="ticket_fechar"
     )
-    async def fechar_ticket(
+    async def fechar_ticket_botao(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
@@ -2489,16 +2505,19 @@ class TicketCloseView(discord.ui.View):
         canal = interaction.channel
         guild = interaction.guild
 
-        if guild is None or not isinstance(
-            canal,
-            discord.TextChannel
-        ):
+        if guild is None or not isinstance(canal, discord.TextChannel):
             return
 
-        if (
-            interaction.user.id != guild.owner_id
-            and not interaction.user.guild_permissions.manage_channels
-        ):
+        dados = ler_dados_ticket(canal)
+
+        if not dados["owner_id"]:
+            await interaction.response.send_message(
+                "Este canal não é um ticket válido.",
+                ephemeral=True
+            )
+            return
+
+        if not eh_responsavel_ticket(guild, interaction.user):
             await interaction.response.send_message(
                 "Você não tem permissão para fechar este ticket.",
                 ephemeral=True
@@ -2506,19 +2525,23 @@ class TicketCloseView(discord.ui.View):
             return
 
         await interaction.response.send_message(
-            "🔒 Este ticket será fechado.",
+            "🔒 Ticket será fechado. Estou enviando a transcrição no privado.",
             ephemeral=True
+        )
+
+        await canal.send(
+            f"🔒 Ticket fechado por {interaction.user.mention}. "
+            "A transcrição será enviada no privado."
         )
 
         await asyncio.sleep(2)
 
-        try:
-            await canal.delete(
-                reason=f"Ticket fechado por {interaction.user}"
-            )
-        except Exception as erro:
-            print(f"Erro fechando ticket: {erro}")
+        await fechar_ticket(canal, interaction.user)
 
+
+# =========================================================
+# SISTEMA DE TICKETS — BOTÃO ABRIR
+# =========================================================
 
 class TicketPanelView(discord.ui.View):
     def __init__(self):
@@ -2542,22 +2565,20 @@ class TicketPanelView(discord.ui.View):
         if guild is None:
             return
 
-        if not isinstance(
-            canal_painel,
-            discord.TextChannel
-        ):
+        if not isinstance(canal_painel, discord.TextChannel):
             return
 
         # Verifica se o usuário já possui ticket aberto.
         for canal in guild.text_channels:
-            if canal.topic == f"ticket_owner:{membro.id}":
+            dados = ler_dados_ticket(canal)
+
+            if dados["owner_id"] == membro.id:
                 await interaction.response.send_message(
                     f"Você já possui um ticket aberto: {canal.mention}",
                     ephemeral=True
                 )
                 return
 
-        # Usa a mesma categoria do canal onde está o painel.
         categoria = canal_painel.category
 
         nome = membro.name.lower()
@@ -2571,79 +2592,118 @@ class TicketPanelView(discord.ui.View):
 
         nome = nome.strip("-")[:80] or "usuario"
 
-        nome_canal = f"ticket-{nome}"
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=False
-            ),
-
-            membro: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-                embed_links=True
-            )
-        }
-
-        # Permissão para o dono do servidor.
-        dono = guild.get_member(guild.owner_id)
-
-        if dono:
-            overwrites[dono] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True
-            )
-
-        # Permissões do bot.
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True
-            )
-
         try:
-            await interaction.response.defer(
-                ephemeral=True
+            await interaction.response.defer(ephemeral=True)
+
+            numero = await proximo_numero_ticket(guild.id)
+            nome_canal = f"ticket-{numero}"
+
+            agora = int(time.time())
+
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    view_channel=False
+                ),
+
+                membro: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    attach_files=True,
+                    embed_links=True
+                )
+            }
+
+            # Dono do servidor.
+            dono = guild.get_member(guild.owner_id)
+
+            if dono:
+                overwrites[dono] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True
+                )
+
+            # Cargos de administradores e responsáveis.
+            for cargo in guild.roles:
+                if (
+                    cargo.permissions.administrator
+                    or cargo.permissions.manage_channels
+                ):
+                    overwrites[cargo] = discord.PermissionOverwrite(
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                        manage_channels=True
+                    )
+
+            # Administradores configurados por ID.
+            for user_id in ADM_CONFIANCA:
+                responsavel = guild.get_member(user_id)
+
+                if responsavel:
+                    overwrites[responsavel] = (
+                        discord.PermissionOverwrite(
+                            view_channel=True,
+                            send_messages=True,
+                            read_message_history=True,
+                            manage_channels=True
+                        )
+                    )
+
+            # Bot.
+            if guild.me:
+                overwrites[guild.me] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True
+                )
+
+            topic = (
+                f"ticket_owner:{membro.id}"
+                f"|ticket_numero:{numero}"
+                f"|ticket_aberto:{agora}"
+                f"|ticket_alertado:0"
+                f"|ticket_respondido:0"
             )
 
-            ticket = await guild.create_text_channel(
+            ticket_canal = await guild.create_text_channel(
                 name=nome_canal,
                 category=categoria,
-                topic=f"ticket_owner:{membro.id}",
+                topic=topic,
                 overwrites=overwrites,
                 reason=f"Ticket aberto por {membro}"
             )
 
             embed = discord.Embed(
-                title="🎫 Ticket aberto",
+                title=f"🎫 Ticket #{numero}",
                 description=(
                     f"Olá {membro.mention}!\n\n"
-                    "Explique o motivo do seu contato "
-                    "e aguarde o atendimento.\n\n"
-                    "Utilize o botão abaixo para fechar "
-                    "este ticket quando terminar."
+                    "Seu atendimento foi aberto com sucesso.\n\n"
+                    "Explique o motivo do seu contato e aguarde "
+                    "a equipe responsável responder.\n\n"
+                    f"**Aberto:** <t:{agora}:R>\n"
+                    f"**Horário:** <t:{agora}:F>\n\n"
+                    "A equipe será avisada caso o ticket fique "
+                    "30 minutos sem resposta."
                 ),
                 color=0x2ECC71
             )
 
             embed.set_footer(
-                text=f"Ticket de {membro}"
+                text=f"Ticket de {membro} • #{numero}"
             )
 
-            await ticket.send(
+            await ticket_canal.send(
                 content=membro.mention,
                 embed=embed,
                 view=TicketCloseView()
             )
 
             await interaction.followup.send(
-                f"Seu ticket foi criado: {ticket.mention}",
+                f"✅ Seu ticket foi criado: {ticket_canal.mention}",
                 ephemeral=True
             )
 
@@ -2679,10 +2739,7 @@ async def ticket(ctx):
 
 
 @ticket.command(name="painel")
-async def ticket_painel(
-    ctx,
-    canal: discord.TextChannel
-):
+async def ticket_painel(ctx, canal: discord.TextChannel):
     if ctx.author.id != ctx.guild.owner_id:
         return
 
