@@ -4,6 +4,7 @@ import os
 import time
 import json
 import asyncio
+import inspect
 from collections import defaultdict
 from datetime import timedelta
 
@@ -17,6 +18,11 @@ ADM_CONFIANCA = []
 LOGS_CHANNEL_ID = 1567711809396277318
 SOLO_DONO_CHANNEL_ID = 1567716695760703528
 MEU_ID = 926223827590078504
+
+JANELA_RAID = 3
+LIMITE_RESTAURACAO = 12       # segundos sem novas ações antes de restaurar
+INTERVALO_AUDIT = 0.35
+MAX_TENTATIVAS_AUDIT = 4
 
 # =========================================================
 # PERMISSÕES / PROTEGIDOS
@@ -35,8 +41,15 @@ def is_protegido(guild, user_id):
     return user_id in ADM_CONFIANCA
 
 
+def permissao_bot(guild):
+    membro = guild.me
+    if membro is None:
+        return None
+    return membro.guild_permissions
+
+
 # =========================================================
-# BACKUP DUPLO: BOM (referência segura) + TEMP
+# BACKUP DUPLO: BOM (REFERÊNCIA SEGURA) + TEMP
 # =========================================================
 def backup_bom_path(guild_id):
     return f"backup_bom_{guild_id}.json"
@@ -70,6 +83,7 @@ def _salvar_arquivo(path, dados):
         with open(temporario, "w", encoding="utf-8") as arquivo:
             json.dump(dados, arquivo, indent=2, ensure_ascii=False)
         os.replace(temporario, path)
+        return True
     except Exception as erro:
         print(f"Erro salvando {path}: {erro}")
         try:
@@ -77,6 +91,7 @@ def _salvar_arquivo(path, dados):
                 os.remove(temporario)
         except OSError:
             pass
+        return False
 
 
 def carregar_backup(guild_id):
@@ -97,15 +112,15 @@ def carregar_backup_temp(guild_id):
 
 
 def salvar_backup(guild_id, dados):
-    _salvar_arquivo(backup_bom_path(guild_id), dados)
+    return _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 
 def salvar_backup_temp(guild_id, dados):
-    _salvar_arquivo(backup_temp_path(guild_id), dados)
+    return _salvar_arquivo(backup_temp_path(guild_id), dados)
 
 
 def salvar_backup_bom(guild_id, dados):
-    _salvar_arquivo(backup_bom_path(guild_id), dados)
+    return _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 
 def snapshot_canal(ch):
@@ -119,10 +134,11 @@ def snapshot_canal(ch):
             "deny": deny.value
         })
 
-    return {
+    tipo = str(ch.type)
+    dados = {
         "id": ch.id,
         "name": ch.name,
-        "type": str(ch.type),
+        "type": tipo,
         "position": ch.position,
         "category_id": ch.category_id,
         "topic": getattr(ch, "topic", None),
@@ -132,6 +148,16 @@ def snapshot_canal(ch):
         "user_limit": getattr(ch, "user_limit", None),
         "overwrites": overwrites
     }
+    # Canal de anúncios é um TextChannel com is_news().
+    try:
+        dados["news"] = bool(ch.is_news())
+    except Exception:
+        dados["news"] = False
+    if hasattr(ch, "default_auto_archive_duration"):
+        dados["default_auto_archive_duration"] = ch.default_auto_archive_duration
+    if hasattr(ch, "default_thread_slowmode_delay"):
+        dados["default_thread_slowmode_delay"] = ch.default_thread_slowmode_delay
+    return dados
 
 
 def snapshot_cargo(role):
@@ -148,29 +174,45 @@ def snapshot_cargo(role):
 
 def tirar_foto_guild(guild):
     dados = {"canais": [], "cargos": []}
-
     for canal in guild.channels:
         dados["canais"].append(snapshot_canal(canal))
-
     for role in guild.roles:
-        if (
-            role.name != "@everyone"
-            and not role.managed
-            and (bot.user is None or role.name != bot.user.name)
-        ):
+        if role.name != "@everyone" and not role.managed:
             dados["cargos"].append(snapshot_cargo(role))
-
     return dados
+
+
+def atualizar_canal_no_backup_temp(guild_id, canal):
+    """Atualiza TEMP apenas quando a ação foi feita por pessoa protegida."""
+    dados = carregar_backup_temp(guild_id)
+    item = snapshot_canal(canal)
+    for i, atual in enumerate(dados["canais"]):
+        if atual.get("id") == canal.id:
+            dados["canais"][i] = item
+            break
+    else:
+        dados["canais"].append(item)
+    salvar_backup_temp(guild_id, dados)
+
+
+def remover_canal_do_backup_temp(guild_id, canal_id):
+    dados = carregar_backup_temp(guild_id)
+    dados["canais"] = [c for c in dados["canais"] if c.get("id") != canal_id]
+    salvar_backup_temp(guild_id, dados)
 
 
 # =========================================================
 # ESTADO DO RAID POR SERVIDOR
 # =========================================================
 raid_state = {}
-ja_banidos = {}  # ID -> horário; evita bloquear o mesmo ID para sempre
+ja_banidos = {}
 mensagens_processadas = set()
 msgs = defaultdict(list)
 acoes = defaultdict(list)
+locks_restauracao = defaultdict(asyncio.Lock)
+
+# Canais recém-criados associados ao executor pelo Audit Log.
+canais_pendentes_por_executor = defaultdict(set)
 
 
 def novo_estado_raid():
@@ -183,7 +225,8 @@ def novo_estado_raid():
         "timer": None,
         "ultimo_ataque": 0,
         "canais_raid_criados": set(),
-        "qtd_ataques": 0
+        "qtd_ataques": 0,
+        "restaurando": False
     }
 
 
@@ -202,7 +245,7 @@ def teve_raid_recente(guild_id, minutos=30):
     return (time.time() - estado["ultimo_ataque"]) < minutos * 60
 
 
-def registrou(tipo, user_id, limite=2, janela=3):
+def registrou(tipo, user_id, limite=2, janela=JANELA_RAID):
     agora = time.time()
     chave = (tipo, user_id)
     acoes[chave] = [t for t in acoes[chave] if agora - t < janela]
@@ -220,7 +263,6 @@ async def sync_backup_loop():
             if teve_raid_recente(guild.id, 30):
                 print(f"⏸️ Sync pulado em {guild.name}: raid recente.")
                 continue
-
             foto = tirar_foto_guild(guild)
             salvar_backup_temp(guild.id, foto)
             salvar_backup_bom(guild.id, foto)
@@ -242,12 +284,9 @@ async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
         canal = guild.get_channel(LOGS_CHANNEL_ID)
         if canal is None:
             canal = await bot.fetch_channel(LOGS_CHANNEL_ID)
-
         if canal and hasattr(canal, "send"):
             embed = discord.Embed(
-                title=titulo,
-                description=descricao,
-                color=cor,
+                title=titulo, description=descricao, color=cor,
                 timestamp=discord.utils.utcnow()
             )
             embed.set_footer(text=f"Servidor: {guild.name}")
@@ -260,7 +299,6 @@ async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
         dono_id = get_dono_id(guild)
         if dono_id:
             destinos.add(dono_id)
-
         for user_id in destinos:
             try:
                 usuario = await bot.fetch_user(user_id)
@@ -274,301 +312,383 @@ async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
 
 
 # =========================================================
-# AUDIT LOG: CONFERE O ALVO PARA NÃO PEGAR AÇÃO ERRADA
+# AUDIT LOG: RETENTATIVAS E CONFERÊNCIA DO ALVO
 # =========================================================
-async def pegar_executor(guild, action, target_id=None, janela=8):
+async def pegar_executor(guild, action, target_id=None, janela=12):
     if guild is None:
         return None
 
-    try:
-        async for entrada in guild.audit_logs(limit=8, action=action):
-            idade = (discord.utils.utcnow() - entrada.created_at).total_seconds()
-            if idade < 0 or idade > janela:
-                continue
-
-            if entrada.user is None or entrada.user.id == bot.user.id:
-                continue
-
-            if target_id is not None:
-                alvo = getattr(entrada, "target", None)
-                if alvo is None or getattr(alvo, "id", None) != target_id:
+    for tentativa in range(MAX_TENTATIVAS_AUDIT):
+        try:
+            async for entrada in guild.audit_logs(limit=12, action=action):
+                idade = (discord.utils.utcnow() - entrada.created_at).total_seconds()
+                if idade < 0 or idade > janela:
                     continue
-
-            return entrada.user.id
-    except discord.Forbidden:
-        print(f"Sem permissão para consultar Audit Log em {guild.name}.")
-    except Exception as erro:
-        print(f"Erro consultando Audit Log: {erro}")
-
+                if entrada.user is None:
+                    continue
+                if bot.user and entrada.user.id == bot.user.id:
+                    continue
+                if target_id is not None:
+                    alvo = getattr(entrada, "target", None)
+                    if alvo is None or getattr(alvo, "id", None) != target_id:
+                        continue
+                return entrada.user.id
+        except discord.Forbidden:
+            print(f"Sem permissão para consultar Audit Log em {guild.name}.")
+            return None
+        except Exception as erro:
+            print(f"Erro consultando Audit Log: {erro}")
+        if tentativa < MAX_TENTATIVAS_AUDIT - 1:
+            await asyncio.sleep(INTERVALO_AUDIT)
     return None
 
 
 # =========================================================
-# RESTAURAÇÃO
+# AGENDAMENTO / RESTAURAÇÃO SEM EXECUÇÕES SIMULTÂNEAS
 # =========================================================
 def agendar_recuperacao(guild):
     estado = get_raid(guild.id)
+    estado["ultimo_ataque"] = time.time()
 
-    if estado["timer"] and not estado["timer"].done():
-        estado["timer"].cancel()
+    tarefa = estado.get("timer")
+    if tarefa and not tarefa.done():
+        # Não cancela a tarefa em andamento. Ela observa ultimo_ataque
+        # e espera o período de silêncio terminar.
+        return
 
     async def esperar_e_restaurar():
         try:
-            await asyncio.sleep(15)
-            await restaurar_tudo(guild)
+            while estado["ativo"]:
+                restante = LIMITE_RESTAURACAO - (time.time() - estado["ultimo_ataque"])
+                if restante > 0:
+                    await asyncio.sleep(min(restante, 2))
+                    continue
+                await restaurar_tudo(guild)
+                return
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as erro:
             print(f"Erro na tarefa de restauração: {erro}")
+        finally:
+            if estado.get("timer") is asyncio.current_task():
+                estado["timer"] = None
 
     estado["timer"] = asyncio.create_task(esperar_e_restaurar())
 
 
+def construir_overwrites(guild, lista):
+    overwrites = {}
+    for ow in lista:
+        if ow.get("is_role", False):
+            alvo = guild.get_role(ow["id"])
+        else:
+            alvo = guild.get_member(ow["id"])
+        if alvo is not None:
+            overwrites[alvo] = discord.PermissionOverwrite.from_pair(
+                discord.Permissions(ow["allow"]),
+                discord.Permissions(ow["deny"])
+            )
+    return overwrites
+
+
+async def criar_canal_backup(guild, dados, mapa_categorias):
+    tipo = dados.get("type", "")
+    nome = dados["name"]
+    categoria_id = dados.get("category_id")
+    categoria = mapa_categorias.get(categoria_id) if categoria_id else None
+    overwrites = construir_overwrites(guild, dados.get("overwrites", []))
+    motivo = "Anti-Nuke: restauração do backup BOM"
+
+    if "category" in tipo:
+        novo = await guild.create_category(
+            name=nome, position=dados.get("position", 0),
+            overwrites=overwrites, reason=motivo
+        )
+        mapa_categorias[dados["id"]] = novo
+        return novo
+
+    if "text" in tipo:
+        kwargs = {
+            "name": nome,
+            "category": categoria,
+            "position": dados.get("position", 0),
+            "topic": dados.get("topic"),
+            "slowmode_delay": dados.get("slowmode", 0),
+            "nsfw": dados.get("nsfw", False),
+            "overwrites": overwrites,
+            "reason": motivo
+        }
+        # Compatibilidade com versões discord.py que aceitam news.
+        try:
+            parametros = inspect.signature(guild.create_text_channel).parameters
+            if "news" in parametros:
+                kwargs["news"] = dados.get("news", False)
+        except Exception:
+            pass
+        return await guild.create_text_channel(**kwargs)
+
+    if "voice" in tipo:
+        return await guild.create_voice_channel(
+            name=nome, category=categoria,
+            position=dados.get("position", 0),
+            bitrate=dados.get("bitrate") or 64000,
+            user_limit=dados.get("user_limit") or 0,
+            overwrites=overwrites, reason=motivo
+        )
+
+    # Fórum e palco dependem da versão da biblioteca instalada.
+    if "forum" in tipo:
+        metodo = getattr(guild, "create_forum", None)
+        if metodo is None:
+            raise RuntimeError("Esta versão do discord.py não oferece create_forum.")
+        kwargs = {
+            "name": nome, "category": categoria,
+            "position": dados.get("position", 0),
+            "topic": dados.get("topic"),
+            "slowmode_delay": dados.get("slowmode", 0),
+            "nsfw": dados.get("nsfw", False),
+            "overwrites": overwrites, "reason": motivo
+        }
+        return await metodo(**kwargs)
+
+    if "stage" in tipo:
+        metodo = getattr(guild, "create_stage_channel", None)
+        if metodo is None:
+            raise RuntimeError("Esta versão do discord.py não oferece create_stage_channel.")
+        return await metodo(
+            name=nome, category=categoria,
+            position=dados.get("position", 0),
+            topic=dados.get("topic"),
+            overwrites=overwrites, reason=motivo
+        )
+
+    raise RuntimeError(f"Tipo de canal não suportado para restauração: {tipo}")
+
+
 async def restaurar_tudo(guild):
     estado = get_raid(guild.id)
-    if not estado["ativo"]:
+    lock = locks_restauracao[guild.id]
+
+    if lock.locked():
+        print(f"⏳ Restauração já está em andamento em {guild.name}.")
         return
 
-    print(f"♻️ Começando restauração em {guild.name}...")
-    backup = carregar_backup(guild.id)
+    async with lock:
+        if not estado["ativo"]:
+            return
 
-    canais_restaurados = 0
-    canais_raid_apagados = 0
-    canais_renomeados = 0
-    cargos_restaurados = 0
+        # Se novas ações ocorreram enquanto aguardava o lock, respeita a janela.
+        restante = LIMITE_RESTAURACAO - (time.time() - estado["ultimo_ataque"])
+        if restante > 0:
+            agendar_recuperacao(guild)
+            return
 
-    ids_backup = {c["id"] for c in backup["canais"]}
+        estado["restaurando"] = True
+        print(f"♻️ Começando restauração em {guild.name}...")
+        backup = carregar_backup(guild.id)
+        canais_restaurados = 0
+        canais_raid_apagados = 0
+        canais_renomeados = 0
+        cargos_restaurados = 0
+        erros_permissao = 0
 
-    # Mantém a limpeza de canais que não pertencem ao backup,
-    # preservando os canais configurados para logs e comandos do dono.
-    for canal in list(guild.channels):
-        if canal.id not in ids_backup and canal.id not in estado["canais_apagados_ids"]:
+        ids_backup = {c.get("id") for c in backup["canais"]}
+        mapa_backup = {c.get("id"): c for c in backup["canais"]}
+
+        # Só apaga canais identificados como criados pelo executor do raid.
+        # Não apaga indiscriminadamente todo canal ausente do backup.
+        ids_raid = set(estado["canais_raid_criados"])
+        ids_raid.update(canais_pendentes_por_executor.pop(
+            (guild.id, estado["raider_id"]), set()
+        ))
+
+        for canal_id in list(ids_raid):
+            canal = guild.get_channel(canal_id)
+            if canal is None or canal_id in ids_backup:
+                continue
             if canal.id in (LOGS_CHANNEL_ID, SOLO_DONO_CHANNEL_ID):
                 continue
             try:
-                await canal.delete(reason="Anti-Nuke: Limpando canal de raid")
+                await canal.delete(reason="Anti-Nuke: removendo canal identificado do raid")
                 canais_raid_apagados += 1
-                await asyncio.sleep(0.3)
-            except Exception as erro:
-                print(f"Erro limpando canal {canal.name}: {erro}")
+                await asyncio.sleep(0.35)
+            except discord.Forbidden as erro:
+                erros_permissao += 1
+                print(f"Sem permissão/acesso para apagar canal {canal_id}: {erro}")
+            except discord.HTTPException as erro:
+                print(f"Erro HTTP apagando canal {canal_id}: {erro}")
 
-    mapa_backup = {c["id"]: c for c in backup["canais"]}
-
-    # Corrige nome, posição e configurações de canais existentes.
-    for canal in list(guild.channels):
-        if canal.id not in mapa_backup:
-            continue
-
-        dados = mapa_backup[canal.id]
-        kwargs = {}
-
-        if canal.name != dados["name"]:
-            kwargs["name"] = dados["name"]
-        if canal.position != dados["position"]:
-            kwargs["position"] = dados["position"]
-
-        if isinstance(canal, discord.TextChannel):
-            if canal.topic != dados.get("topic"):
-                kwargs["topic"] = dados.get("topic")
-            if canal.slowmode_delay != dados.get("slowmode", 0):
-                kwargs["slowmode_delay"] = dados.get("slowmode", 0)
-            if canal.nsfw != dados.get("nsfw", False):
-                kwargs["nsfw"] = dados.get("nsfw", False)
-
-        if kwargs:
-            try:
-                await canal.edit(reason="Anti-Nuke: Restaurando nome/configuração", **kwargs)
-                canais_renomeados += 1
-                await asyncio.sleep(0.3)
-            except Exception as erro:
-                print(f"Erro corrigir canal {canal.name}: {erro}")
-
-    # Recria canais ausentes. Categorias vêm primeiro para permitir associá-los.
-    ordem_tipo = {"category": 0, "text": 1, "voice": 2}
-    canais_ordenados = sorted(
-        backup["canais"],
-        key=lambda item: (ordem_tipo.get(item.get("type", ""), 3), item.get("position", 0))
-    )
-
-    canais_atuais_ids = {c.id for c in guild.channels}
-
-    for dados in canais_ordenados:
-        if dados["id"] in canais_atuais_ids:
-            continue
-
-        try:
-            categoria = (
-                guild.get_channel(dados.get("category_id"))
-                if dados.get("category_id")
-                else None
-            )
-
-            overwrites = {}
-            for ow in dados.get("overwrites", []):
-                if ow.get("is_role", False):
-                    alvo = guild.get_role(ow["id"])
-                else:
-                    alvo = guild.get_member(ow["id"])
-
-                if alvo is not None:
-                    overwrites[alvo] = discord.PermissionOverwrite.from_pair(
-                        discord.Permissions(ow["allow"]),
-                        discord.Permissions(ow["deny"])
-                    )
-
-            tipo = dados.get("type", "")
-
-            if "category" in tipo:
-                await guild.create_category(
-                    name=dados["name"],
-                    position=dados.get("position", 0),
-                    overwrites=overwrites,
-                    reason="Anti-Nuke Restore"
-                )
-            elif "text" in tipo:
-                await guild.create_text_channel(
-                    name=dados["name"],
-                    category=categoria,
-                    position=dados.get("position", 0),
-                    topic=dados.get("topic"),
-                    slowmode_delay=dados.get("slowmode", 0),
-                    nsfw=dados.get("nsfw", False),
-                    overwrites=overwrites,
-                    reason="Anti-Nuke Restore"
-                )
-            elif "voice" in tipo:
-                await guild.create_voice_channel(
-                    name=dados["name"],
-                    category=categoria,
-                    position=dados.get("position", 0),
-                    bitrate=dados.get("bitrate") or 64000,
-                    user_limit=dados.get("user_limit") or 0,
-                    overwrites=overwrites,
-                    reason="Anti-Nuke Restore"
-                )
-            else:
+        # Corrige canais do backup que ainda existem.
+        for canal in list(guild.channels):
+            dados = mapa_backup.get(canal.id)
+            if not dados:
                 continue
+            kwargs = {}
+            if canal.name != dados.get("name"):
+                kwargs["name"] = dados["name"]
+            if canal.position != dados.get("position"):
+                kwargs["position"] = dados["position"]
+            if isinstance(canal, discord.TextChannel):
+                if canal.topic != dados.get("topic"):
+                    kwargs["topic"] = dados.get("topic")
+                if canal.slowmode_delay != dados.get("slowmode", 0):
+                    kwargs["slowmode_delay"] = dados.get("slowmode", 0)
+                if canal.nsfw != dados.get("nsfw", False):
+                    kwargs["nsfw"] = dados.get("nsfw", False)
+            if kwargs:
+                try:
+                    await canal.edit(reason="Anti-Nuke: restaurando configuração", **kwargs)
+                    canais_renomeados += 1
+                    await asyncio.sleep(0.25)
+                except discord.Forbidden as erro:
+                    erros_permissao += 1
+                    print(f"Sem permissão para editar canal {canal.name}: {erro}")
+                except discord.HTTPException as erro:
+                    print(f"Erro editando canal {canal.name}: {erro}")
 
-            canais_restaurados += 1
-            await asyncio.sleep(0.4)
+        # Recria categorias primeiro; guarda o novo ID para canais filhos.
+        mapa_categorias = {}
+        categorias = [c for c in backup["canais"] if "category" in c.get("type", "")]
+        demais = [c for c in backup["canais"] if "category" not in c.get("type", "")]
+        canais_atuais_ids = {c.id for c in guild.channels}
 
-        except Exception as erro:
-            print(f"Erro restaurar canal {dados.get('name')}: {erro}")
+        for dados in categorias + demais:
+            if dados.get("id") in canais_atuais_ids:
+                atual = guild.get_channel(dados["id"])
+                if atual and isinstance(atual, discord.CategoryChannel):
+                    mapa_categorias[dados["id"]] = atual
+                continue
+            try:
+                novo = await criar_canal_backup(guild, dados, mapa_categorias)
+                if novo:
+                    canais_restaurados += 1
+                    if "category" in dados.get("type", ""):
+                        mapa_categorias[dados["id"]] = novo
+                    await asyncio.sleep(0.4)
+            except discord.Forbidden as erro:
+                erros_permissao += 1
+                print(f"Sem permissão para recriar canal {dados.get('name')}: {erro}")
+            except Exception as erro:
+                print(f"Erro restaurar canal {dados.get('name')}: {erro}")
 
-    # Recria cargos ausentes pelo nome (o Discord gera um ID novo).
-    cargos_atuais = {role.name for role in guild.roles}
-    for dados in backup["cargos"]:
-        if dados["name"] in cargos_atuais:
-            continue
+        # Recria cargos ausentes. IDs mudam após recriação; posição é ajustada
+        # apenas quando a hierarquia e as permissões do bot permitem.
+        cargos_atuais = {role.name for role in guild.roles}
+        for dados in backup["cargos"]:
+            if dados.get("name") in cargos_atuais:
+                continue
+            try:
+                cargo = await guild.create_role(
+                    name=dados["name"],
+                    colour=discord.Colour(dados["color"]),
+                    hoist=dados["hoist"],
+                    mentionable=dados["mentionable"],
+                    permissions=discord.Permissions(dados["permissions"]),
+                    reason="Anti-Nuke: restauração do backup BOM"
+                )
+                cargos_restaurados += 1
+                cargos_atuais.add(cargo.name)
+                await asyncio.sleep(0.35)
+            except discord.Forbidden as erro:
+                erros_permissao += 1
+                print(f"Sem permissão para recriar cargo {dados['name']}: {erro}")
+            except Exception as erro:
+                print(f"Erro restaurar cargo {dados['name']}: {erro}")
+
+        # Se chegou outra ação durante a recuperação, agenda nova rodada.
+        if time.time() - estado["ultimo_ataque"] < LIMITE_RESTAURACAO:
+            estado["restaurando"] = False
+            agendar_recuperacao(guild)
+            return
 
         try:
-            await guild.create_role(
-                name=dados["name"],
-                colour=discord.Colour(dados["color"]),
-                hoist=dados["hoist"],
-                mentionable=dados["mentionable"],
-                permissions=discord.Permissions(dados["permissions"]),
-                reason="Anti-Nuke Restore"
-            )
-            cargos_restaurados += 1
-            await asyncio.sleep(0.3)
+            canal_logs = guild.get_channel(LOGS_CHANNEL_ID)
+            if canal_logs:
+                embed = discord.Embed(
+                    title="🛡️ Raid finalizado",
+                    description=(
+                        f"**Raider:** {estado['raider_nome']} (`{estado['raider_id']}`)\n"
+                        f"**Canais do raid removidos:** {canais_raid_apagados}\n"
+                        f"**Canais restaurados:** {canais_restaurados}\n"
+                        f"**Canais corrigidos:** {canais_renomeados}\n"
+                        f"**Cargos restaurados:** {cargos_restaurados}\n"
+                        f"**Falhas de permissão:** {erros_permissao}"
+                    ),
+                    color=0x2ECC71, timestamp=discord.utils.utcnow()
+                )
+                embed.set_footer(text=f"Servidor: {guild.name}")
+                await canal_logs.send(embed=embed)
         except Exception as erro:
-            print(f"Erro restaurar cargo {dados['name']}: {erro}")
+            print(f"Erro enviando relatório: {erro}")
 
-    try:
-        canal_logs = guild.get_channel(LOGS_CHANNEL_ID)
-        if canal_logs:
-            embed = discord.Embed(
-                title="🛡️ Raid finalizado",
-                description=(
-                    f"**Raider:** {estado['raider_nome']} (`{estado['raider_id']}`)\n"
-                    f"**Canais do raid apagados:** {canais_raid_apagados}\n"
-                    f"**Canais restaurados:** {canais_restaurados}\n"
-                    f"**Canais renomeados corrigidos:** {canais_renomeados}\n"
-                    f"**Cargos restaurados:** {cargos_restaurados}\n"
-                    f"**Tempo de espera:** 15s"
-                ),
-                color=0x2ECC71,
-                timestamp=discord.utils.utcnow()
-            )
-            embed.set_footer(text=f"Servidor: {guild.name}")
-            await canal_logs.send(embed=embed)
-    except Exception as erro:
-        print(f"Erro enviando relatório de restauração: {erro}")
+        # Fecha o incidente, mantendo o BOM intacto.
+        raid_state[guild.id] = novo_estado_raid()
+        raid_state[guild.id]["ultimo_ataque"] = time.time()
 
-    raid_state[guild.id] = novo_estado_raid()
-    raid_state[guild.id]["ultimo_ataque"] = time.time()
+        # TEMP volta a espelhar o estado atual; BOM só muda no sync/manual.
+        try:
+            foto_limpa = tirar_foto_guild(guild)
+            salvar_backup_temp(guild.id, foto_limpa)
+        except Exception as erro:
+            print(f"Erro atualizando backup TEMP após raid: {erro}")
 
-    try:
-        foto_limpa = tirar_foto_guild(guild)
-        salvar_backup_temp(guild.id, foto_limpa)
-    except Exception as erro:
-        print(f"Erro atualizando backup temporário após raid: {erro}")
-
-    print(f"✅ Restauração finalizada em {guild.name}")
+        print(f"✅ Restauração finalizada em {guild.name}")
 
 
 # =========================================================
 # BANIMENTO / ATIVAÇÃO DO RAID
 # =========================================================
 async def punir(guild, executor_id, motivo):
-    if guild is None or executor_id is None:
+    if guild is None or executor_id is None or is_protegido(guild, executor_id):
         return False
 
-    if is_protegido(guild, executor_id):
-        return False
-
-    # Ativa a recuperação antes da tentativa de ban.
-    # Assim, falha de permissão no ban não deixa a restauração sem agendamento.
     estado = get_raid(guild.id)
+    primeiro_acionamento = not estado["ativo"]
     estado["ativo"] = True
     estado["raider_id"] = executor_id
     estado["ultimo_ataque"] = time.time()
     estado["qtd_ataques"] += 1
+    estado["canais_raid_criados"].update(
+        canais_pendentes_por_executor.get((guild.id, executor_id), set())
+    )
 
-    if estado["timer"] is None or estado["timer"].done():
+    if primeiro_acionamento or estado["raider_nome"] == "Desconhecido":
         try:
-            usuario = await bot.fetch_user(executor_id)
+            membro = guild.get_member(executor_id)
+            usuario = membro or await bot.fetch_user(executor_id)
             estado["raider_nome"] = str(usuario)
         except Exception:
             estado["raider_nome"] = f"ID {executor_id}"
 
     agendar_recuperacao(guild)
 
-    # Evita tentar banir repetidamente o mesmo executor em sequência.
     agora = time.time()
     if executor_id in ja_banidos and agora - ja_banidos[executor_id] < 60:
         return False
-    ja_banidos[executor_id] = agora
 
+    # Só marca como tentado após uma tentativa; falhas podem ser retentadas.
     try:
         membro = guild.get_member(executor_id)
         if membro is None:
-            membro = await guild.fetch_member(executor_id)
+            try:
+                membro = await guild.fetch_member(executor_id)
+            except discord.NotFound:
+                membro = await bot.fetch_user(executor_id)
 
-        estado["raider_nome"] = str(membro)
         await guild.ban(membro, reason=f"ANTI-NUKE: {motivo}")
+        ja_banidos[executor_id] = agora
         print(f"🚨 Banido: {membro} - {motivo}")
+        await enviar_log(
+            guild, "🚨 Banido - Anti-Nuke",
+            f"**Executor:** <@{executor_id}> (`{executor_id}`)\n**Motivo:** {motivo}",
+            cor=0xE74C3C
+        )
         return True
-
-    except discord.NotFound:
-        # O usuário pode já ter saído. Tenta banir pelo objeto User.
-        try:
-            usuario = await bot.fetch_user(executor_id)
-            await guild.ban(usuario, reason=f"ANTI-NUKE: {motivo}")
-            print(f"🚨 Ban por ID: {executor_id} - {motivo}")
-            return True
-        except Exception as erro:
-            print(f"Não foi possível banir ID {executor_id}: {erro}")
-            return False
-
-    except discord.Forbidden:
-        print(f"Sem permissão para banir o executor {executor_id} em {guild.name}.")
-        return False
-
+    except discord.Forbidden as erro:
+        print(f"Sem permissão/hierarquia para banir {executor_id}: {erro}")
     except Exception as erro:
-        print(f"Erro punir: {erro}")
-        return False
+        print(f"Erro ao punir {executor_id}: {erro}")
+    return False
 
 
 # =========================================================
@@ -576,11 +696,8 @@ async def punir(guild, executor_id, motivo):
 # =========================================================
 @bot.event
 async def on_ready():
-    print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO 30min")
-    await bot.change_presence(
-        activity=discord.Game(name="🛡️ SYSTEM PROTECTING")
-    )
-
+    print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO")
+    await bot.change_presence(activity=discord.Game(name="🛡️ SYSTEM PROTECTING"))
     for guild in bot.guilds:
         try:
             if not os.path.exists(backup_bom_path(guild.id)):
@@ -595,7 +712,6 @@ async def on_ready():
                 print(f"📂 Backup BOM carregado: {guild.name}")
         except Exception as erro:
             print(f"Erro backup inicial {guild.name}: {erro}")
-
     if not sync_backup_loop.is_running():
         sync_backup_loop.start()
 
@@ -612,18 +728,14 @@ async def on_guild_join(guild):
 
 
 # =========================================================
-# MENSAGENS / ANTI-SPAM / COMANDOS DESTE BOT
-# Os comandos de outros bots (ex.: !mute e !create canal) não
-# são implementados aqui. Mensagens de bots são ignoradas.
+# MENSAGENS / ANTI-SPAM / COMANDOS
 # =========================================================
 @bot.event
 async def on_message(message):
     if message.author.bot or message.guild is None:
         return
-
     if message.id in mensagens_processadas:
         return
-
     mensagens_processadas.add(message.id)
     if len(mensagens_processadas) > 5000:
         mensagens_processadas.clear()
@@ -635,7 +747,6 @@ async def on_message(message):
             except discord.HTTPException:
                 pass
             return
-
         await bot.process_commands(message)
         return
 
@@ -652,8 +763,7 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # Não conta comandos como spam. Isso evita punir quem usa comandos
-    # destinados a outros bots no mesmo servidor.
+    # Não conta comandos como spam; mensagens de outros bots são ignoradas acima.
     if message.content.startswith("!"):
         await bot.process_commands(message)
         return
@@ -662,7 +772,6 @@ async def on_message(message):
     chave = (message.guild.id, message.author.id)
     msgs[chave] = [t for t in msgs[chave] if agora - t < 3]
     msgs[chave].append(agora)
-
     if len(msgs[chave]) >= 5:
         msgs[chave].clear()
         try:
@@ -671,11 +780,10 @@ async def on_message(message):
                 reason="Anti-Spam: 5 mensagens em 3 segundos"
             )
             await enviar_log(
-                message.guild,
-                "💬 Anti-Spam - Mute",
+                message.guild, "💬 Anti-Spam - Mute",
                 f"**Usuário:** {message.author.mention} (`{message.author.id}`)\n"
                 f"**Canal:** {message.channel.mention}\n"
-                f"**Ação:** Mutado por 10 minutos (5 mensagens em 3s)",
+                f"**Ação:** Timeout por 10 minutos (5 mensagens em 3s)",
                 cor=0xFFA500
             )
         except discord.Forbidden:
@@ -683,7 +791,6 @@ async def on_message(message):
         except Exception as erro:
             print(f"Erro no anti-spam: {erro}")
         return
-
     await bot.process_commands(message)
 
 
@@ -692,9 +799,7 @@ async def on_message(message):
 # =========================================================
 @bot.event
 async def on_member_ban(guild, user):
-    executor = await pegar_executor(
-        guild, discord.AuditLogAction.ban, target_id=user.id
-    )
+    executor = await pegar_executor(guild, discord.AuditLogAction.ban, user.id)
     if executor and registrou("ban", executor, 2, 3):
         await punir(guild, executor, "Baniu 2 membros em 3 segundos")
 
@@ -702,7 +807,7 @@ async def on_member_ban(guild, user):
 @bot.event
 async def on_member_remove(member):
     executor = await pegar_executor(
-        member.guild, discord.AuditLogAction.kick, target_id=member.id
+        member.guild, discord.AuditLogAction.kick, member.id
     )
     if executor and registrou("kick", executor, 2, 3):
         await punir(member.guild, executor, "Expulsou 2 membros em 3 segundos")
@@ -712,257 +817,203 @@ async def on_member_remove(member):
 async def on_guild_channel_create(channel):
     guild = channel.guild
     estado = get_raid(guild.id)
+    executor = await pegar_executor(
+        guild, discord.AuditLogAction.channel_create, channel.id
+    )
 
-    if estado["ativo"]:
-        estado["ultimo_ataque"] = time.time()
-        estado["canais_raid_criados"].add(channel.id)
-        agendar_recuperacao(guild)
+    if executor and not is_protegido(guild, executor):
+        canais_pendentes_por_executor[(guild.id, executor)].add(channel.id)
+        if estado["ativo"] and executor == estado["raider_id"]:
+            estado["canais_raid_criados"].add(channel.id)
+            agendar_recuperacao(guild)
+        elif registrou("canal_criar", executor, 2, 3):
+            await punir(guild, executor, "Criou 2 canais em 3 segundos")
         return
 
-    try:
-        dados = carregar_backup_temp(guild.id)
-        if not any(c["id"] == channel.id for c in dados["canais"]):
-            dados["canais"].append(snapshot_canal(channel))
-            salvar_backup_temp(guild.id, dados)
-    except Exception as erro:
-        print(f"Erro atualizando backup TEMP de canal: {erro}")
-
-    executor = await pegar_executor(
-        guild, discord.AuditLogAction.channel_create, target_id=channel.id
-    )
-    if executor and registrou("canal_criar", executor, 2, 3):
-        await punir(guild, executor, "Criou 2 canais em 3 segundos")
+    # Só ações de usuários protegidos entram no TEMP automaticamente.
+    if executor and is_protegido(guild, executor):
+        try:
+            atualizar_canal_no_backup_temp(guild.id, channel)
+        except Exception as erro:
+            print(f"Erro atualizando TEMP de canal legítimo: {erro}")
 
 
 @bot.event
 async def on_guild_channel_delete(channel):
     guild = channel.guild
     estado = get_raid(guild.id)
-
-    if estado["ativo"]:
-        estado["ultimo_ataque"] = time.time()
-        estado["canais_apagados_ids"].add(channel.id)
-        agendar_recuperacao(guild)
-
-        executor = await pegar_executor(
-            guild, discord.AuditLogAction.channel_delete, target_id=channel.id
-        )
-        if executor and registrou("canal_del", executor, 2, 3):
-            await punir(guild, executor, "Deletou 2 canais em 3 segundos")
-        return
-
     executor = await pegar_executor(
-        guild, discord.AuditLogAction.channel_delete, target_id=channel.id
+        guild, discord.AuditLogAction.channel_delete, channel.id
     )
 
-    try:
-        dados = carregar_backup_temp(guild.id)
-        dados["canais"] = [
-            item for item in dados["canais"] if item["id"] != channel.id
-        ]
-        salvar_backup_temp(guild.id, dados)
-    except Exception as erro:
-        print(f"Erro removendo canal do backup TEMP: {erro}")
+    if estado["ativo"]:
+        estado["canais_apagados_ids"].add(channel.id)
+        estado["ultimo_ataque"] = time.time()
+        agendar_recuperacao(guild)
+        if executor and not is_protegido(guild, executor):
+            if executor == estado["raider_id"] and registrou("canal_del", executor, 2, 3):
+                await punir(guild, executor, "Deletou 2 canais em 3 segundos")
+        return
 
-    if executor and not is_protegido(guild, executor) and executor != bot.user.id:
+    if executor and not is_protegido(guild, executor):
+        if registrou("canal_del", executor, 2, 3):
+            await punir(guild, executor, "Deletou 2 canais em 3 segundos")
+        # Se foi uma ação suspeita, o BOM será usado para recriar o canal.
+        if get_raid(guild.id)["ativo"]:
+            estado = get_raid(guild.id)
+            estado["canais_apagados_ids"].add(channel.id)
+            agendar_recuperacao(guild)
+            return
+
         try:
             categoria = channel.category
             overwrites = channel.overwrites
-
             if isinstance(channel, discord.TextChannel):
                 novo = await guild.create_text_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    topic=channel.topic,
-                    slowmode_delay=channel.slowmode_delay,
-                    nsfw=channel.nsfw,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke"
+                    name=channel.name, category=categoria,
+                    position=channel.position, topic=channel.topic,
+                    slowmode_delay=channel.slowmode_delay, nsfw=channel.nsfw,
+                    overwrites=overwrites, reason="BACKUP Anti-Nuke"
                 )
             elif isinstance(channel, discord.VoiceChannel):
                 novo = await guild.create_voice_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    bitrate=channel.bitrate,
-                    user_limit=channel.user_limit,
-                    overwrites=overwrites,
+                    name=channel.name, category=categoria,
+                    position=channel.position, bitrate=channel.bitrate,
+                    user_limit=channel.user_limit, overwrites=overwrites,
                     reason="BACKUP Anti-Nuke"
                 )
             elif isinstance(channel, discord.CategoryChannel):
                 novo = await guild.create_category(
-                    name=channel.name,
-                    position=channel.position,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke"
+                    name=channel.name, position=channel.position,
+                    overwrites=overwrites, reason="BACKUP Anti-Nuke"
                 )
             else:
                 novo = None
-
             if novo:
                 print(f"♻️ BACKUP: Canal #{channel.name} recriado!")
                 await enviar_log(
-                    guild,
-                    "♻️ Backup - Canal Recriado",
+                    guild, "♻️ Backup - Canal Recriado",
                     f"**Canal:** #{channel.name}\n"
                     f"**Deletado por:** <@{executor}> (`{executor}`)\n"
-                    f"**Ação:** Canal recriado automaticamente",
+                    "**Ação:** Canal recriado automaticamente",
                     cor=0x2ECC71
                 )
         except Exception as erro:
             print(f"Erro backup canal: {erro}")
-
-    if executor and registrou("canal_del", executor, 2, 3):
-        await punir(guild, executor, "Deletou 2 canais em 3 segundos")
+    else:
+        # Remoção legítima: atualiza TEMP, mas nunca altera o BOM.
+        try:
+            remover_canal_do_backup_temp(guild.id, channel.id)
+        except Exception as erro:
+            print(f"Erro removendo canal do TEMP: {erro}")
 
 
 @bot.event
 async def on_guild_channel_update(antes, depois):
-    estado = get_raid(depois.guild.id)
-    if estado["ativo"]:
-        estado["ultimo_ataque"] = time.time()
-        agendar_recuperacao(depois.guild)
+    guild = depois.guild
+    executor = await pegar_executor(
+        guild, discord.AuditLogAction.channel_update, depois.id
+    )
+    if executor and not is_protegido(guild, executor):
+        if registrou("canal_update", executor, 2, 3):
+            await punir(guild, executor, "Alterou 2 canais em 3 segundos")
+        if get_raid(guild.id)["ativo"]:
+            agendar_recuperacao(guild)
+            return
         return
 
-    mudou = (
-        antes.name != depois.name
-        or antes.position != depois.position
-        or getattr(antes, "topic", None) != getattr(depois, "topic", None)
-    )
-
-    if mudou:
+    if executor and is_protegido(guild, executor):
         try:
-            dados = carregar_backup_temp(depois.guild.id)
-            encontrado = False
-
-            for indice, item in enumerate(dados["canais"]):
-                if item["id"] == depois.id:
-                    dados["canais"][indice] = snapshot_canal(depois)
-                    encontrado = True
-                    break
-
-            if not encontrado:
-                dados["canais"].append(snapshot_canal(depois))
-
-            salvar_backup_temp(depois.guild.id, dados)
+            atualizar_canal_no_backup_temp(guild.id, depois)
         except Exception as erro:
-            print(f"Erro atualizando canal no backup TEMP: {erro}")
-
-    executor = await pegar_executor(
-        depois.guild,
-        discord.AuditLogAction.channel_update,
-        target_id=depois.id
-    )
-    if executor and registrou("canal_rename", executor, 2, 3):
-        await punir(depois.guild, executor, "Alterou 2 canais em 3 segundos")
+            print(f"Erro atualizando TEMP de canal: {erro}")
 
 
 @bot.event
 async def on_guild_role_create(role):
-    estado = get_raid(role.guild.id)
-    if estado["ativo"]:
-        estado["ultimo_ataque"] = time.time()
-        agendar_recuperacao(role.guild)
+    guild = role.guild
+    estado = get_raid(guild.id)
+    executor = await pegar_executor(guild, discord.AuditLogAction.role_create, role.id)
+    if executor and not is_protegido(guild, executor):
+        if estado["ativo"]:
+            estado["ultimo_ataque"] = time.time()
+            agendar_recuperacao(guild)
+        elif registrou("cargo_criar", executor, 2, 3):
+            await punir(guild, executor, "Criou 2 cargos em 3 segundos")
         return
 
-    try:
-        dados = carregar_backup_temp(role.guild.id)
-        if not any(item["id"] == role.id for item in dados["cargos"]):
-            dados["cargos"].append(snapshot_cargo(role))
-            salvar_backup_temp(role.guild.id, dados)
-    except Exception as erro:
-        print(f"Erro atualizando backup TEMP de cargo: {erro}")
-
-    executor = await pegar_executor(
-        role.guild, discord.AuditLogAction.role_create, target_id=role.id
-    )
-    if executor and registrou("cargo_criar", executor, 2, 3):
-        await punir(role.guild, executor, "Criou 2 cargos em 3 segundos")
+    if executor and is_protegido(guild, executor):
+        try:
+            dados = carregar_backup_temp(guild.id)
+            if not any(x.get("id") == role.id for x in dados["cargos"]):
+                dados["cargos"].append(snapshot_cargo(role))
+                salvar_backup_temp(guild.id, dados)
+        except Exception as erro:
+            print(f"Erro atualizando TEMP de cargo: {erro}")
 
 
 @bot.event
 async def on_guild_role_delete(role):
-    estado = get_raid(role.guild.id)
+    guild = role.guild
+    executor = await pegar_executor(guild, discord.AuditLogAction.role_delete, role.id)
+    estado = get_raid(guild.id)
     if estado["ativo"]:
-        estado["ultimo_ataque"] = time.time()
         estado["cargos_apagados"].append(role.name)
-        agendar_recuperacao(role.guild)
+        estado["ultimo_ataque"] = time.time()
+        agendar_recuperacao(guild)
         return
 
-    executor = await pegar_executor(
-        role.guild, discord.AuditLogAction.role_delete, target_id=role.id
-    )
-
-    try:
-        dados = carregar_backup_temp(role.guild.id)
-        dados["cargos"] = [
-            item for item in dados["cargos"] if item["id"] != role.id
-        ]
-        salvar_backup_temp(role.guild.id, dados)
-    except Exception as erro:
-        print(f"Erro removendo cargo do backup TEMP: {erro}")
-
-    if (
-        executor
-        and not is_protegido(role.guild, executor)
-        and executor != bot.user.id
-        and role.name != "@everyone"
-    ):
+    if executor and not is_protegido(guild, executor):
+        if registrou("cargo_del", executor, 2, 3):
+            await punir(guild, executor, "Deletou 2 cargos em 3 segundos")
+        if get_raid(guild.id)["ativo"]:
+            agendar_recuperacao(guild)
+            return
         try:
-            await role.guild.create_role(
-                name=role.name,
-                colour=role.colour,
-                hoist=role.hoist,
-                mentionable=role.mentionable,
-                permissions=role.permissions,
+            await guild.create_role(
+                name=role.name, colour=role.colour, hoist=role.hoist,
+                mentionable=role.mentionable, permissions=role.permissions,
                 reason="BACKUP Anti-Nuke"
             )
             print(f"♻️ BACKUP: Cargo {role.name} recriado!")
-            await enviar_log(
-                role.guild,
-                "♻️ Backup - Cargo Recriado",
-                f"**Cargo:** {role.name}\n"
-                f"**Deletado por:** <@{executor}> (`{executor}`)\n"
-                f"**Ação:** Cargo recriado automaticamente",
-                cor=0x2ECC71
-            )
         except Exception as erro:
             print(f"Erro backup cargo: {erro}")
-
-    if executor and registrou("cargo_del", executor, 2, 3):
-        await punir(role.guild, executor, "Deletou 2 cargos em 3 segundos")
+    else:
+        try:
+            dados = carregar_backup_temp(guild.id)
+            dados["cargos"] = [x for x in dados["cargos"] if x.get("id") != role.id]
+            salvar_backup_temp(guild.id, dados)
+        except Exception as erro:
+            print(f"Erro removendo cargo do TEMP: {erro}")
 
 
 @bot.event
 async def on_guild_role_update(antes, depois):
-    if (
-        not antes.permissions.administrator
-        and depois.permissions.administrator
-    ):
-        executor = await pegar_executor(
-            depois.guild,
-            discord.AuditLogAction.role_update,
-            target_id=depois.id
+    mudou_permissoes = antes.permissions.value != depois.permissions.value
+    if not mudou_permissoes:
+        return
+    executor = await pegar_executor(
+        depois.guild, discord.AuditLogAction.role_update, depois.id
+    )
+    if executor and not is_protegido(depois.guild, executor):
+        if depois.permissions.administrator and not antes.permissions.administrator:
+            motivo = "Tentou dar ADM via cargo"
+        else:
+            motivo = "Alterou permissões de cargo"
+        await enviar_log(
+            depois.guild, "⚠️ Alteração de permissões de cargo",
+            f"**Por:** <@{executor}> (`{executor}`)\n"
+            f"**Cargo:** {depois.name}\n**Ação:** {motivo}",
+            cor=0xFFA500
         )
-        if executor:
-            await enviar_log(
-                depois.guild,
-                "⚠️ Tentativa de dar ADM",
-                f"**Por:** <@{executor}> (`{executor}`)\n"
-                f"**Cargo:** {depois.name}\n"
-                f"**Ação:** Tentou dar ADM via cargo",
-                cor=0xFFA500
-            )
-            await punir(depois.guild, executor, "Tentou dar ADM via cargo")
+        await punir(depois.guild, executor, motivo)
 
 
 @bot.event
 async def on_webhooks_update(channel):
-    executor = await pegar_executor(
-        channel.guild, discord.AuditLogAction.webhook_create
-    )
-    if executor and not is_protegido(channel.guild, executor):
+    guild = channel.guild
+    executor = await pegar_executor(guild, discord.AuditLogAction.webhook_create)
+    if executor and not is_protegido(guild, executor):
         try:
             webhooks = await channel.webhooks()
             for webhook in webhooks:
@@ -970,71 +1021,65 @@ async def on_webhooks_update(channel):
                     await webhook.delete(reason="Anti-Nuke: webhook suspeito")
         except Exception as erro:
             print(f"Erro removendo webhook: {erro}")
-
-        await punir(channel.guild, executor, "Criou webhook suspeito")
+        await punir(guild, executor, "Criou webhook suspeito")
 
 
 @bot.event
 async def on_guild_emojis_update(guild, antes, depois):
     if len(depois) < len(antes):
-        executor = await pegar_executor(
-            guild, discord.AuditLogAction.emoji_delete
-        )
-        if executor and registrou("emoji", executor, 2, 3):
+        executor = await pegar_executor(guild, discord.AuditLogAction.emoji_delete)
+        if executor and not is_protegido(guild, executor) and registrou("emoji", executor, 2, 3):
             await punir(guild, executor, "Deletou emojis em massa")
 
 
 @bot.event
 async def on_guild_stickers_update(guild, antes, depois):
     if len(depois) < len(antes):
-        executor = await pegar_executor(
-            guild, discord.AuditLogAction.sticker_delete
-        )
-        if executor:
+        executor = await pegar_executor(guild, discord.AuditLogAction.sticker_delete)
+        if executor and not is_protegido(guild, executor):
             await punir(guild, executor, "Deletou sticker")
 
 
 @bot.event
 async def on_raw_bulk_message_delete(payload):
-    if len(payload.cached_messages) >= 5 and payload.guild_id:
-        guild = bot.get_guild(payload.guild_id)
-        if guild is None:
-            return
-
-        executor = await pegar_executor(
-            guild, discord.AuditLogAction.message_bulk_delete
-        )
-        if executor:
-            await punir(guild, executor, "Apagou mensagens em massa")
+    if payload.guild_id is None:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+    # raw payload não garante cache completo; usa o Audit Log como fonte.
+    executor = await pegar_executor(guild, discord.AuditLogAction.message_bulk_delete)
+    if executor and not is_protegido(guild, executor):
+        await punir(guild, executor, "Apagou mensagens em massa")
 
 
 @bot.event
 async def on_guild_update(antes, depois):
-    if antes.name != depois.name or antes.icon != depois.icon:
-        executor = await pegar_executor(
-            depois, discord.AuditLogAction.guild_update
-        )
+    mudou_nome = antes.name != depois.name
+    mudou_icone = antes.icon != depois.icon
+    if not mudou_nome and not mudou_icone:
+        return
 
-        if executor and not is_protegido(depois, executor):
-            try:
-                # Guild.edit espera bytes para o ícone, não um objeto Asset.
-                icone_bytes = await antes.icon.read() if antes.icon else None
-                await depois.edit(
-                    name=antes.name,
-                    icon=icone_bytes,
-                    reason="Anti-Nuke: restaurando nome/ícone"
-                )
-            except Exception as erro:
-                print(f"Erro restaurando nome/ícone: {erro}")
+    executor = await pegar_executor(depois, discord.AuditLogAction.guild_update)
+    if not executor or is_protegido(depois, executor):
+        return
 
-            await enviar_log(
-                depois,
-                "🏷️ Nome/Ícone Alterado",
-                f"**Por:** <@{executor}> (`{executor}`)\n"
-                f"**Ação:** Nome/ícone restaurado",
-                cor=0xFFA500
-            )
-            await punir(depois, executor, "Tentou mudar nome/ícone do servidor")
+    try:
+        icone_bytes = await antes.icon.read() if mudou_icone and antes.icon else None
+        kwargs = {"name": antes.name}
+        if mudou_icone:
+            kwargs["icon"] = icone_bytes
+        await depois.edit(reason="Anti-Nuke: restaurando nome/ícone", **kwargs)
+    except Exception as erro:
+        print(f"Erro restaurando nome/ícone: {erro}")
+
+    await enviar_log(
+        depois, "🏷️ Nome/Ícone Alterado",
+        f"**Por:** <@{executor}> (`{executor}`)\n"
+        "**Ação:** tentativa de alteração do servidor revertida",
+        cor=0xFFA500
+    )
+    await punir(depois, executor, "Tentou mudar nome/ícone do servidor")
 
 
 # =========================================================
@@ -1045,57 +1090,44 @@ async def protecoes(ctx):
     embed = discord.Embed(
         title="🛡️ ANTI-NUKE | Proteções Ativas",
         description=(
-            "O servidor está protegido 24h. Ataques identificados são "
-            "registrados e as estruturas salvas são restauradas."
+            "O servidor está protegido. Ações suspeitas são registradas "
+            "e a estrutura salva no backup BOM pode ser restaurada."
         ),
         color=0x5865F2
     )
-
     embed.set_thumbnail(
         url=ctx.guild.icon.url if ctx.guild.icon else bot.user.display_avatar.url
     )
     embed.add_field(
         name="⚔️ Anti-Nuke",
-        value=(
-            "> 🚫 Mass Ban — 2 bans em 3s\n"
-            "> 🚫 Mass Kick — 2 kicks em 3s\n"
-            "> 🚫 Dar ADM via cargo\n"
-            "> 🚫 Criar webhook suspeito"
-        ),
+        value="> 🚫 Mass Ban — 2 bans em 3s\n"
+              "> 🚫 Mass Kick — 2 kicks em 3s\n"
+              "> 🚫 Alteração de permissões / tentativa de dar ADM\n"
+              "> 🚫 Criação de webhook suspeito",
         inline=False
     )
     embed.add_field(
         name="♻️ Backup Automático",
-        value=(
-            "> 📁 Canais deletados são recriados\n"
-            "> 🎭 Cargos deletados são recriados\n"
-            "> 🏷️ Nome e ícone do servidor restaurados"
-        ),
+        value="> 📁 Canais deletados são recriados\n"
+              "> 🎭 Cargos deletados são recriados\n"
+              "> 🏷️ Nome e ícone do servidor restaurados",
         inline=False
     )
     embed.add_field(
         name="🛠️ Anti-Raid / Moderação",
-        value=(
-            "> 💬 Anti-Spam — 5 mensagens em 3s = mute 10min\n"
-            "> 🧹 Anti-apagar mensagens em massa\n"
-            "> ✏️ Anti-renomear canais em massa"
-        ),
+        value="> 💬 Anti-Spam — 5 mensagens em 3s = timeout 10min\n"
+              "> 🧹 Detecção de exclusão em massa\n"
+              "> ✏️ Detecção de alterações em canais",
         inline=False
     )
     embed.add_field(
         name="🎨 Anti-Vandalismo",
-        value=(
-            "> 😀 Anti-deletar emojis\n"
-            "> 🌟 Anti-deletar stickers\n"
-            "> ➕ Anti-criar/deletar canais e cargos em massa"
-        ),
+        value="> 😀 Exclusão de emojis\n"
+              "> 🌟 Exclusão de stickers\n"
+              "> ➕ Criação/exclusão em massa de canais e cargos",
         inline=False
     )
-    embed.add_field(
-        name="📌 Comandos",
-        value="`!protecoes` — Ver este painel",
-        inline=False
-    )
+    embed.add_field(name="📌 Comandos", value="`!protecoes` — Ver este painel", inline=False)
     embed.set_footer(
         text=f"Servidor: {ctx.guild.name} • Protegido por {bot.user.name}",
         icon_url=bot.user.display_avatar.url
@@ -1103,10 +1135,7 @@ async def protecoes(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(
-    name="atualizar",
-    aliases=["atualizarbackup", "backup", "salvar"]
-)
+@bot.command(name="atualizar", aliases=["atualizarbackup", "backup", "salvar"])
 async def atualizar_backup(ctx, *, arg: str = ""):
     if not is_protegido(ctx.guild, ctx.author.id):
         try:
@@ -1114,27 +1143,19 @@ async def atualizar_backup(ctx, *, arg: str = ""):
         except discord.HTTPException:
             pass
         return
-
     if ctx.invoked_with in ("backup", "salvar"):
         arg = "backup"
-
     if arg.strip().lower() not in ("backup", ""):
         await ctx.send("Usa assim: `!atualizar backup`", delete_after=5)
         return
-
     estado = get_raid(ctx.guild.id)
     if estado["ativo"]:
-        await ctx.send(
-            "⚠️ Há uma raid em andamento. O backup BOM não será atualizado.",
-            delete_after=8
-        )
+        await ctx.send("⚠️ Há uma raid em andamento. O backup BOM não será atualizado.", delete_after=8)
         return
-
     try:
         foto = tirar_foto_guild(ctx.guild)
         salvar_backup_bom(ctx.guild.id, foto)
         salvar_backup_temp(ctx.guild.id, foto)
-
         await ctx.send(
             f"✅ Backup BOM atualizado! **{len(foto['canais'])} canais** "
             f"e **{len(foto['cargos'])} cargos** salvos.",
@@ -1153,45 +1174,32 @@ async def limpar(ctx, quantidade: int = 0):
         except discord.HTTPException:
             pass
         return
-
     if quantidade <= 0 or quantidade > 1000:
-        await ctx.send(
-            "Usa assim: `!limpar 100` — número entre 1 e 1000",
-            delete_after=5
-        )
+        await ctx.send("Usa assim: `!limpar 100` — número entre 1 e 1000", delete_after=5)
         try:
             await ctx.message.delete()
         except discord.HTTPException:
             pass
         return
-
     try:
         await ctx.message.delete()
     except discord.HTTPException:
         pass
-
     apagadas = 0
     restante = quantidade
-
     while restante > 0:
         lote = min(restante, 100)
         try:
             deletadas = await ctx.channel.purge(limit=lote)
             apagadas += len(deletadas)
             restante -= lote
-
             if len(deletadas) < lote:
                 break
-
             await asyncio.sleep(0.5)
         except Exception as erro:
             print(f"Erro limpar: {erro}")
             break
-
-    await ctx.send(
-        f"🧹 Limpas **{apagadas}** mensagens!",
-        delete_after=5
-    )
+    await ctx.send(f"🧹 Limpas **{apagadas}** mensagens!", delete_after=5)
 
 
 # =========================================================
