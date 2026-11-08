@@ -2444,10 +2444,10 @@ async def on_guild_update(antes, depois):
 @bot.command(name="recursos")
 async def recursos(ctx):
     embed = discord.Embed(
-        title="🛡️ RECURSOS DO SISTEMA",
+        title="🛡️ CENTRAL DE RECURSOS",
         description=(
-            "Conheça as principais funcionalidades "
-            "disponíveis no bot."
+            "Um sistema desenvolvido para oferecer mais segurança, "
+            "organização e praticidade ao seu servidor Discord."
         ),
         color=0x5865F2
     )
@@ -2461,21 +2461,11 @@ async def recursos(ctx):
     )
 
     embed.add_field(
-        name="🛡️ Proteção Antiraid",
+        name="🛡️ Proteção Anti-Nuke e Anti-Raid",
         value=(
-            "> Proteção contra ataques e ações em massa.\n"
-            "> Monitoramento de canais, cargos e webhooks.\n"
-            "> Identificação de responsáveis por ações suspeitas."
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="📦 Backup e Restauração",
-        value=(
-            "> Backup automático do servidor.\n"
-            "> Atualização manual do backup.\n"
-            "> Restauração de canais e cargos."
+            "> Proteção contra ataques, invasões e ações administrativas suspeitas.\n"
+            "> Monitoramento de alterações e ações em massa.\n"
+            "> Identificação de responsáveis e recuperação do servidor quando necessário."
         ),
         inline=False
     )
@@ -2483,31 +2473,59 @@ async def recursos(ctx):
     embed.add_field(
         name="🎫 Sistema de Tickets",
         value=(
-            "> Painel para abertura de tickets.\n"
-            "> Canais privados de atendimento.\n"
-            "> O próprio usuário pode fechar seu ticket pelo botão.\n"
-            "> Alerta automático após 30 minutos sem resposta.\n"
-            "> Transcrição enviada ao fechar o ticket."
+            "> Painel próprio para abertura de atendimentos.\n"
+            "> Canais privados para conversar com a equipe.\n"
+            "> Fechamento de tickets e geração de transcrições.\n"
+            "> Alertas automáticos quando um atendimento fica sem resposta."
         ),
         inline=False
     )
 
     embed.add_field(
-        name="🧹 Limpeza de canais",
+        name="📦 Backup e Restauração",
         value=(
-            "> `!limpar 100` — apaga mensagens em lotes.\n"
-            "> `!limpar canal todo` — recria o canal sem as mensagens."
+            "> Salvamento automático da estrutura do servidor.\n"
+            "> Backup de canais e cargos.\n"
+            "> Recuperação da estrutura após ações destrutivas ou ataques."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🚨 Sistema de Logs",
+        value=(
+            "> Registro de atividades suspeitas.\n"
+            "> Identificação de responsáveis por alterações.\n"
+            "> Notificações sobre ações importantes realizadas no servidor."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="💬 Proteção Anti-Spam",
+        value=(
+            "> Identificação de mensagens enviadas em excesso.\n"
+            "> Aplicação automática de timeout em usuários que praticam spam."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🧹 Gerenciamento e Limpeza",
+        value=(
+            "> Ferramentas para organização dos canais.\n"
+            "> Limpeza de mensagens em grande quantidade.\n"
+            "> Recriação de canais quando necessário."
         ),
         inline=False
     )
 
     embed.set_footer(
-        text="SEGURANÇA E ATENDIMENTO EM UM SÓ LUGAR.",
+        text="Mais proteção, controle e organização. Tudo em um só bot.",
         icon_url=bot.user.display_avatar.url
     )
 
     await ctx.send(embed=embed)
-
 
 # =========================================================
 # COMANDO: ATUALIZAR BACKUP
