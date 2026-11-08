@@ -32,6 +32,7 @@ INTERVALO_AUDIT = 0.35
 MAX_TENTATIVAS_AUDIT = 4
 
 TEMPO_ALERTA_TICKET = 30 * 60
+TEMPO_FECHAMENTO_INATIVIDADE_TICKET = 3 * 60 * 60
 
 VIEWS_REGISTRADAS = False
 
@@ -1193,6 +1194,9 @@ async def on_ready():
     if not verificar_tickets_sem_resposta.is_running():
         verificar_tickets_sem_resposta.start()
 
+    if not fechar_tickets_por_inatividade.is_running():
+        fechar_tickets_por_inatividade.start()
+
 
 @bot.event
 async def on_guild_join(guild):
@@ -1266,7 +1270,9 @@ def ler_dados_ticket(canal):
         "numero": None,
         "aberto_em": None,
         "alertado": False,
-        "respondido": False
+        "respondido": False,
+        "assumido_por": None,
+        "ultima_atividade": None
     }
 
     if not topic:
@@ -1296,6 +1302,12 @@ def ler_dados_ticket(canal):
             elif chave == "ticket_respondido":
                 dados["respondido"] = valor == "1"
 
+            elif chave == "ticket_assumido_por":
+                dados["assumido_por"] = int(valor) if valor not in ("", "None", "0") else None
+
+            elif chave == "ticket_ultima_atividade":
+                dados["ultima_atividade"] = int(valor)
+
         except (ValueError, TypeError):
             pass
 
@@ -1312,7 +1324,9 @@ async def atualizar_dados_ticket(canal, **alteracoes):
         f"ticket_numero:{dados['numero']}",
         f"ticket_aberto:{dados['aberto_em']}",
         f"ticket_alertado:{1 if dados['alertado'] else 0}",
-        f"ticket_respondido:{1 if dados['respondido'] else 0}"
+        f"ticket_respondido:{1 if dados['respondido'] else 0}",
+        f"ticket_assumido_por:{dados.get('assumido_por') or 0}",
+        f"ticket_ultima_atividade:{dados.get('ultima_atividade') or dados.get('aberto_em') or int(time.time())}"
     ]
 
     try:
@@ -1602,6 +1616,65 @@ async def verificar_tickets_sem_resposta():
                 )
 
 
+@tasks.loop(minutes=1)
+async def fechar_tickets_por_inatividade():
+    """Fecha tickets que ficam 3 horas sem nenhuma nova mensagem."""
+    agora = int(time.time())
+
+    for guild in bot.guilds:
+        for canal in list(guild.text_channels):
+            try:
+                dados = ler_dados_ticket(canal)
+                if not dados["owner_id"]:
+                    continue
+
+                ultima_atividade = dados.get("ultima_atividade")
+
+                # Compatibilidade com tickets antigos que ainda não possuem
+                # o campo de última atividade no tópico.
+                if not ultima_atividade:
+                    ultima_atividade = dados.get("aberto_em")
+                    try:
+                        async for mensagem in canal.history(limit=100):
+                            if not mensagem.author.bot:
+                                ultima_atividade = int(mensagem.created_at.timestamp())
+                                break
+                    except Exception as erro:
+                        print(f"Erro lendo atividade antiga do ticket {canal.name}: {erro}")
+
+                    if ultima_atividade:
+                        await atualizar_dados_ticket(
+                            canal,
+                            ultima_atividade=ultima_atividade
+                        )
+
+                if not ultima_atividade:
+                    continue
+
+                if agora - ultima_atividade < TEMPO_FECHAMENTO_INATIVIDADE_TICKET:
+                    continue
+
+                aviso = (
+                    "⏰ Este ticket foi encerrado automaticamente após "
+                    "3 horas sem novas mensagens. A transcrição será enviada no privado."
+                )
+                try:
+                    await canal.send(aviso)
+                except Exception as erro:
+                    print(f"Erro avisando fechamento por inatividade: {erro}")
+
+                await asyncio.sleep(1)
+                await fechar_ticket(canal, "Sistema automático (3 horas de inatividade)")
+
+            except Exception as erro:
+                print(f"Erro verificando inatividade do ticket {canal.name}: {erro}")
+
+
+@fechar_tickets_por_inatividade.before_loop
+async def antes_fechar_tickets_por_inatividade():
+    await bot.wait_until_ready()
+
+
 @verificar_tickets_sem_resposta.before_loop
 async def antes_verificar_tickets():
     await bot.wait_until_ready()
@@ -1623,6 +1696,17 @@ async def on_message(message):
 
     if len(mensagens_processadas) > 5000:
         mensagens_processadas.clear()
+
+    # =====================================================
+    # ATUALIZAR ATIVIDADE DO TICKET (PRAZO DE 3 HORAS)
+    # =====================================================
+
+    dados_ticket = ler_dados_ticket(message.channel)
+    if dados_ticket["owner_id"]:
+        await atualizar_dados_ticket(
+            message.channel,
+            ultima_atividade=int(time.time())
+        )
 
     # =====================================================
     # IDENTIFICAR RESPOSTA DE RESPONSÁVEL NO TICKET
@@ -2645,6 +2729,61 @@ class TicketCloseView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
+        label="Assumir ticket",
+        emoji="🙋",
+        style=discord.ButtonStyle.primary,
+        custom_id="ticket_assumir"
+    )
+    async def assumir_ticket_botao(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        canal = interaction.channel
+        guild = interaction.guild
+
+        if guild is None or not isinstance(canal, discord.TextChannel):
+            return
+
+        dados = ler_dados_ticket(canal)
+        if not dados["owner_id"]:
+            await interaction.response.send_message(
+                "Este canal não é um ticket válido.", ephemeral=True
+            )
+            return
+
+        if not eh_responsavel_ticket(guild, interaction.user):
+            await interaction.response.send_message(
+                "Apenas a equipe de atendimento pode assumir tickets.",
+                ephemeral=True
+            )
+            return
+
+        assumido_por = dados.get("assumido_por")
+        if assumido_por and assumido_por != interaction.user.id:
+            await interaction.response.send_message(
+                f"Este ticket já foi assumido por <@{assumido_por}>.",
+                ephemeral=True
+            )
+            return
+
+        if assumido_por == interaction.user.id:
+            await interaction.response.send_message(
+                "Você já está responsável por este ticket.", ephemeral=True
+            )
+            return
+
+        await atualizar_dados_ticket(
+            canal,
+            assumido_por=interaction.user.id,
+            ultima_atividade=int(time.time())
+        )
+        await interaction.response.send_message(
+            f"🙋 {interaction.user.mention} assumiu este atendimento!",
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
+
+    @discord.ui.button(
         label="Fechar ticket",
         emoji="🔒",
         style=discord.ButtonStyle.danger,
@@ -2834,6 +2973,8 @@ class TicketPanelView(discord.ui.View):
                 f"|ticket_aberto:{agora}"
                 f"|ticket_alertado:0"
                 f"|ticket_respondido:0"
+                f"|ticket_assumido_por:0"
+                f"|ticket_ultima_atividade:{agora}"
             )
 
             ticket_canal = await guild.create_text_channel(
