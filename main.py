@@ -398,44 +398,52 @@ async def antes_sync():
 
 
 # =========================================================
-# LOGS
+# LOGS — SOMENTE PARA O DONO DO BOT
 # =========================================================
 
 async def enviar_log_simples(guild, titulo, descricao, cor=0xFF0000):
-    try:
-        canal = resolver_canal_configurado(guild, LOGS_CHANNEL_ID)
+    """
+    Envia os logs exclusivamente por mensagem privada para MEU_ID.
+    Não envia logs para o canal configurado e não envia DM
+    para o dono do servidor onde ocorreu o evento.
+    """
 
-        if canal and hasattr(canal, "send"):
-            embed = discord.Embed(
-                title=titulo,
-                description=descricao,
-                color=cor,
-                timestamp=discord.utils.utcnow()
+    try:
+        embed = discord.Embed(
+            title=titulo,
+            description=descricao,
+            color=cor,
+            timestamp=discord.utils.utcnow()
+        )
+
+        if guild:
+            embed.add_field(
+                name="🌐 Servidor",
+                value=(
+                    f"**{guild.name}**\n"
+                    f"ID: `{guild.id}`"
+                ),
+                inline=False
             )
 
-            embed.set_footer(text=f"Servidor: {guild.name}")
-            await canal.send(embed=embed)
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+
+            embed.set_footer(
+                text="Sistema Anti-Nuke • Relatório privado"
+            )
+
+        usuario = await bot.fetch_user(MEU_ID)
+        await usuario.send(embed=embed)
+
+    except discord.Forbidden:
+        print(
+            "Não foi possível enviar o log: "
+            "ative as mensagens privadas do bot."
+        )
 
     except Exception as erro:
-        print(f"Erro log canal: {erro}")
-
-    if (
-        "Raid finalizado" not in titulo
-        and "Banido" not in titulo
-    ):
-        destinos = {MEU_ID}
-        dono_id = get_dono_id(guild)
-
-        if dono_id:
-            destinos.add(dono_id)
-
-        for user_id in destinos:
-            try:
-                usuario = await bot.fetch_user(user_id)
-                await usuario.send(f"{titulo}\n{descricao}")
-                await asyncio.sleep(0.5)
-            except Exception:
-                pass
+        print(f"Erro enviando log privado para MEU_ID: {erro}")
 
 
 async def enviar_log(guild, titulo, descricao, cor=0xFF0000):
@@ -723,6 +731,17 @@ async def restaurar_tudo(guild):
             print("❌ Backup vazio! Restauração cancelada.")
             estado["restaurando"] = False
             estado["ativo"] = False
+
+            await enviar_log(
+                guild,
+                "❌ Restauração cancelada",
+                (
+                    "A proteção detectou uma raid, mas o backup BOM "
+                    "está vazio. Não foi possível restaurar os canais "
+                    "e cargos automaticamente."
+                ),
+                cor=0xE74C3C
+            )
             return
 
         salvar_mapa_canais(guild.id, {})
@@ -960,35 +979,31 @@ async def restaurar_tudo(guild):
             return
 
         # =================================================
-        # FASE 7 — RELATÓRIO FINAL
+        # FASE 7 — RELATÓRIO PRIVADO PARA O DONO DO BOT
         # =================================================
 
         try:
-            canal_logs = resolver_canal_configurado(
+            await enviar_log(
                 guild,
-                LOGS_CHANNEL_ID
+                "🛡️ RAID FINALIZADA — RESTAURAÇÃO CONCLUÍDA",
+                (
+                    f"**Responsável identificado:** "
+                    f"{estado['raider_nome']} "
+                    f"(`{estado['raider_id']}`)\n\n"
+                    f"**Ações detectadas:** {estado['qtd_ataques']}\n"
+                    f"**Canais apagados durante a recuperação:** "
+                    f"{canais_apagados}\n"
+                    f"**Canais restaurados:** {canais_restaurados}\n"
+                    f"**Cargos restaurados:** {cargos_restaurados}\n"
+                    f"**Falhas de permissão:** {erros_permissao}\n\n"
+                    "O sistema concluiu a tentativa de restauração "
+                    "com os dados disponíveis no backup BOM."
+                ),
+                cor=0x2ECC71
             )
 
-            if canal_logs:
-                embed = discord.Embed(
-                    title="🛡️ Raid finalizado",
-                    description=(
-                        f"**Raider:** {estado['raider_nome']} "
-                        f"(`{estado['raider_id']}`)\n"
-                        f"**Canais apagados:** {canais_apagados}\n"
-                        f"**Canais restaurados:** {canais_restaurados}\n"
-                        f"**Cargos restaurados:** {cargos_restaurados}\n"
-                        f"**Falhas de permissão:** {erros_permissao}"
-                    ),
-                    color=0x2ECC71,
-                    timestamp=discord.utils.utcnow()
-                )
-
-                embed.set_footer(text=f"Servidor: {guild.name}")
-                await canal_logs.send(embed=embed)
-
         except Exception as erro:
-            print(f"Erro enviando relatório: {erro}")
+            print(f"Erro enviando relatório privado: {erro}")
 
         # =================================================
         # FINALIZAR RAID
@@ -1048,6 +1063,23 @@ async def punir(guild, executor_id, motivo):
         except Exception:
             estado["raider_nome"] = f"ID {executor_id}"
 
+    # Avisa você somente na primeira detecção desta raid.
+    if primeiro_acionamento:
+        await enviar_log(
+            guild,
+            "🚨 RAID DETECTADA — PROTEÇÃO ATIVADA",
+            (
+                f"**Servidor:** {guild.name}\n"
+                f"**Possível responsável:** {estado['raider_nome']} "
+                f"(`{executor_id}`)\n"
+                f"**Primeira ação identificada:** {motivo}\n\n"
+                "🛡️ O Anti-Nuke foi ativado e está monitorando "
+                "novas ações. A restauração será iniciada após "
+                "o período sem novos ataques."
+            ),
+            cor=0xE74C3C
+        )
+
     agendar_recuperacao(guild)
 
     agora = time.time()
@@ -1078,9 +1110,10 @@ async def punir(guild, executor_id, motivo):
 
         await enviar_log(
             guild,
-            "🚨 Banido - Anti-Nuke",
+            "🚨 Banido — Anti-Nuke",
             f"**Executor:** <@{executor_id}> (`{executor_id}`)\n"
-            f"**Motivo:** {motivo}",
+            f"**Motivo:** {motivo}\n"
+            "**Resultado:** banimento aplicado com sucesso.",
             cor=0xE74C3C
         )
 
@@ -1090,6 +1123,19 @@ async def punir(guild, executor_id, motivo):
         print(
             f"Sem permissão/hierarquia para banir "
             f"{executor_id}: {erro}"
+        )
+
+        await enviar_log(
+            guild,
+            "⚠️ Anti-Nuke — Não foi possível banir",
+            (
+                f"**Executor:** <@{executor_id}> (`{executor_id}`)\n"
+                f"**Motivo:** {motivo}\n"
+                "O bot detectou a ação, mas não conseguiu banir "
+                "o usuário. Verifique a hierarquia de cargos "
+                "e as permissões do bot."
+            ),
+            cor=0xFFA500
         )
 
     except Exception as erro:
@@ -1612,7 +1658,7 @@ async def on_message(message):
             )
 
     # =====================================================
-    # COMANDO .f PARA FECHAR TICKET
+    # COMANDO .f PARA FECHAR TICKET — SOMENTE RESPONSÁVEIS
     # =====================================================
 
     if message.content.strip().lower() == ".f":
@@ -1739,7 +1785,7 @@ async def on_message(message):
 
             await enviar_log(
                 message.guild,
-                "💬 Anti-Spam - Mute",
+                "💬 Anti-Spam — Mute",
                 f"**Usuário:** {message.author.mention} "
                 f"(`{message.author.id}`)\n"
                 f"**Canal:** {message.channel.mention}\n"
@@ -1972,7 +2018,7 @@ async def on_guild_channel_delete(channel):
 
                 await enviar_log(
                     guild,
-                    "♻️ Backup - Canal Recriado",
+                    "♻️ Backup — Canal Recriado",
                     f"**Canal:** #{channel.name}\n"
                     f"**Deletado por:** <@{executor}> (`{executor}`)\n"
                     "**Ação:** Canal recriado automaticamente",
@@ -2369,8 +2415,18 @@ async def recursos(ctx):
         value=(
             "> Painel para abertura de tickets.\n"
             "> Canais privados de atendimento.\n"
+            "> O próprio usuário pode fechar seu ticket pelo botão.\n"
             "> Alerta automático após 30 minutos sem resposta.\n"
             "> Transcrição enviada ao fechar o ticket."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🧹 Limpeza de canais",
+        value=(
+            "> `!limpar 100` — apaga mensagens em lotes.\n"
+            "> `!limpar canal todo` — recria o canal sem as mensagens."
         ),
         inline=False
     )
@@ -2445,8 +2501,119 @@ async def atualizar_backup(ctx, *, arg: str = ""):
 # =========================================================
 
 @bot.command(name="limpar")
-async def limpar(ctx, quantidade: int = 0):
+async def limpar(ctx, *, argumento: str = ""):
     if ctx.author.id != ctx.guild.owner_id:
+        return
+
+    argumento = argumento.strip().lower()
+
+    # -----------------------------------------------------
+    # NOVA OPÇÃO: !limpar canal todo
+    # -----------------------------------------------------
+
+    if argumento in (
+        "canal todo",
+        "canal",
+        "tudo",
+        "canal inteiro"
+    ):
+        canal_antigo = ctx.channel
+
+        if not isinstance(canal_antigo, discord.TextChannel):
+            await ctx.send(
+                "❌ Esse comando só funciona em canais de texto.",
+                delete_after=5
+            )
+            return
+
+        try:
+            nome_antigo = canal_antigo.name
+            posicao_antiga = canal_antigo.position
+
+            # Primeiro cria uma cópia com as configurações,
+            # categoria e permissões do canal original.
+            novo_canal = await canal_antigo.clone(
+                name=nome_antigo,
+                reason=(
+                    f"Limpeza completa solicitada por {ctx.author}"
+                )
+            )
+
+            # Mantém a posição do canal na lista.
+            await novo_canal.edit(
+                position=posicao_antiga,
+                reason="Mantendo posição original do canal"
+            )
+
+            # Só exclui o canal antigo depois que o novo existe.
+            try:
+                await canal_antigo.delete(
+                    reason=(
+                        f"Canal substituído por limpeza solicitada "
+                        f"por {ctx.author}"
+                    )
+                )
+
+            except Exception:
+                # Se não conseguir excluir o antigo, tenta apagar
+                # o clone para não deixar dois canais iguais.
+                try:
+                    await novo_canal.delete(
+                        reason="Falha ao substituir canal antigo"
+                    )
+                except Exception:
+                    pass
+
+                raise
+
+            await novo_canal.send(
+                "🧹 **Canal limpo com sucesso!**\n"
+                "O canal foi recriado mantendo suas configurações, "
+                "categoria e permissões. Todas as mensagens antigas "
+                "foram removidas."
+            )
+
+            print(
+                f"🧹 Canal #{nome_antigo} recriado por "
+                f"{ctx.author} em {ctx.guild.name}"
+            )
+
+        except discord.Forbidden:
+            try:
+                await ctx.author.send(
+                    f"❌ Não consegui recriar o canal **#{canal_antigo.name}** "
+                    "porque faltam permissões. Verifique se o bot tem "
+                    "`Gerenciar Canais`."
+                )
+            except Exception:
+                pass
+
+        except Exception as erro:
+            print(f"Erro limpando canal inteiro: {erro}")
+
+            try:
+                await ctx.author.send(
+                    "❌ Ocorreu um erro ao recriar o canal. "
+                    "Verifique as permissões do bot."
+                )
+            except Exception:
+                pass
+
+        return
+
+    # -----------------------------------------------------
+    # OPÇÃO ORIGINAL: !limpar 100
+    # -----------------------------------------------------
+
+    try:
+        quantidade = int(argumento)
+    except (ValueError, TypeError):
+        await ctx.send(
+            "Usa assim:\n"
+            "`!limpar 100` — apagar mensagens\n"
+            "`!limpar canal todo` — recriar o canal inteiro",
+            delete_after=7
+        )
         return
 
     if quantidade <= 0 or quantidade > 1000:
@@ -2517,7 +2684,18 @@ class TicketCloseView(discord.ui.View):
             )
             return
 
-        if not eh_responsavel_ticket(guild, interaction.user):
+        # Agora pode fechar se for o autor do ticket
+        # OU se for um responsável/administrador.
+        eh_dono_ticket = (
+            interaction.user.id == dados["owner_id"]
+        )
+
+        eh_equipe = eh_responsavel_ticket(
+            guild,
+            interaction.user
+        )
+
+        if not eh_dono_ticket and not eh_equipe:
             await interaction.response.send_message(
                 "Você não tem permissão para fechar este ticket.",
                 ephemeral=True
@@ -2529,10 +2707,13 @@ class TicketCloseView(discord.ui.View):
             ephemeral=True
         )
 
-        await canal.send(
-            f"🔒 Ticket fechado por {interaction.user.mention}. "
-            "A transcrição será enviada no privado."
-        )
+        try:
+            await canal.send(
+                f"🔒 Ticket fechado por {interaction.user.mention}. "
+                "Estou enviando a transcrição no privado..."
+            )
+        except Exception as erro:
+            print(f"Erro enviando aviso de fechamento: {erro}")
 
         await asyncio.sleep(2)
 
@@ -2691,6 +2872,21 @@ class TicketPanelView(discord.ui.View):
                 ),
                 color=0x2ECC71
             )
+
+            embed.add_field(
+                name="🔒 Fechar seu ticket",
+                value=(
+                    "Quando seu atendimento terminar, você mesmo "
+                    "poderá fechar este ticket pelo botão "
+                    "**Fechar ticket** abaixo.\n\n"
+                    "A transcrição da conversa será enviada "
+                    "no seu privado."
+                ),
+                inline=False
+            )
+
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
 
             embed.set_footer(
                 text=f"Ticket de {membro} • #{numero}"
