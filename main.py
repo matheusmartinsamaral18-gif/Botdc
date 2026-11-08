@@ -32,13 +32,11 @@ INTERVALO_AUDIT = 0.35
 MAX_TENTATIVAS_AUDIT = 4
 
 TEMPO_ALERTA_TICKET = 30 * 60
-TEMPO_INATIVIDADE_TICKET = 3 * 60 * 60
 
 VIEWS_REGISTRADAS = False
+
+# Locks para evitar dois tickets com o mesmo número.
 locks_tickets = defaultdict(asyncio.Lock)
-locks_fechamento_ticket = defaultdict(asyncio.Lock)
-mencoes_msgs = defaultdict(list)
-historico_punicoes_flood = {}
 
 
 # =========================================================
@@ -1162,7 +1160,7 @@ async def on_ready():
 
     if not VIEWS_REGISTRADAS:
         bot.add_view(TicketPanelView())
-        bot.add_view(TicketAssumirView())
+        bot.add_view(TicketCloseView())
         VIEWS_REGISTRADAS = True
 
     for guild in bot.guilds:
@@ -1194,9 +1192,6 @@ async def on_ready():
 
     if not verificar_tickets_sem_resposta.is_running():
         verificar_tickets_sem_resposta.start()
-
-    if not verificar_tickets_inativos.is_running():
-        verificar_tickets_inativos.start()
 
 
 @bot.event
@@ -1271,9 +1266,7 @@ def ler_dados_ticket(canal):
         "numero": None,
         "aberto_em": None,
         "alertado": False,
-        "respondido": False,
-        "atividade_em": None,
-        "assumido_por": None
+        "respondido": False
     }
 
     if not topic:
@@ -1302,10 +1295,6 @@ def ler_dados_ticket(canal):
 
             elif chave == "ticket_respondido":
                 dados["respondido"] = valor == "1"
-            elif chave == "ticket_atividade":
-                dados["atividade_em"] = int(valor)
-            elif chave == "ticket_assumido_por":
-                dados["assumido_por"] = int(valor) or None
 
         except (ValueError, TypeError):
             pass
@@ -1323,9 +1312,7 @@ async def atualizar_dados_ticket(canal, **alteracoes):
         f"ticket_numero:{dados['numero']}",
         f"ticket_aberto:{dados['aberto_em']}",
         f"ticket_alertado:{1 if dados['alertado'] else 0}",
-        f"ticket_respondido:{1 if dados['respondido'] else 0}",
-        f"ticket_atividade:{dados.get('atividade_em') or dados.get('aberto_em') or int(time.time())}",
-        f"ticket_assumido_por:{dados.get('assumido_por') or 0}"
+        f"ticket_respondido:{1 if dados['respondido'] else 0}"
     ]
 
     try:
@@ -1383,29 +1370,22 @@ def obter_responsaveis_ticket(guild):
 # TRANSCRIÇÃO E FECHAMENTO
 # =========================================================
 
-async def gerar_transcricao(canal):
+async def gerar_transcricao(canal, fechado_por=None):
     dados = ler_dados_ticket(canal)
-
     mensagens = []
 
-    async for mensagem in canal.history(
-        limit=None,
-        oldest_first=True
-    ):
-        data = mensagem.created_at.strftime("%d/%m/%Y %H:%M:%S")
-
+    async for mensagem in canal.history(limit=None, oldest_first=True):
+        data = mensagem.created_at.strftime("%d/%m/%Y às %H:%M:%S UTC")
         conteudo = mensagem.content or ""
 
         if mensagem.embeds:
-            conteudo += " [Mensagem com embed]"
+            conteudo += "\n[Mensagem contém embed]"
 
         if mensagem.attachments:
-            anexos = "\n".join(
-                f"Anexo: {anexo.url}"
+            conteudo += "\nANEXOS:\n" + "\n".join(
+                f"- {anexo.filename}: {anexo.url}"
                 for anexo in mensagem.attachments
             )
-
-            conteudo += "\n" + anexos
 
         if mensagem.stickers:
             conteudo += "\n[Sticker enviado]"
@@ -1414,102 +1394,116 @@ async def gerar_transcricao(canal):
             conteudo = "[Mensagem sem texto]"
 
         mensagens.append(
-            f"[{data}] {mensagem.author} "
-            f"(ID: {mensagem.author.id}):\n{conteudo}\n"
+            f"{'─' * 72}\n"
+            f"MENSAGEM {len(mensagens) + 1:03d}\n"
+            f"Data: {data}\n"
+            f"Autor: {mensagem.author}\n"
+            f"ID do autor: {mensagem.author.id}\n"
+            f"{'─' * 72}\n"
+            f"{conteudo}\n"
         )
 
     inicio = dados.get("aberto_em")
-
     if inicio:
-        data_inicio = datetime.fromtimestamp(
-            inicio,
-            timezone.utc
-        )
-
+        data_inicio = datetime.fromtimestamp(inicio, timezone.utc)
         duracao = max(0, int(time.time() - inicio))
-
         horas, resto = divmod(duracao, 3600)
         minutos, segundos = divmod(resto, 60)
-
-        tempo_aberto = (
-            f"{horas}h {minutos}min {segundos}s"
-        )
-
-        data_formatada = data_inicio.strftime("%d/%m/%Y %H:%M:%S")
+        tempo_aberto = f"{horas}h {minutos}min {segundos}s"
+        data_formatada = data_inicio.strftime("%d/%m/%Y às %H:%M:%S UTC")
     else:
         tempo_aberto = "Não registrado"
         data_formatada = "Não registrado"
 
-    conteudo_final = (
-        f"TRANSCRIÇÃO DO TICKET\n"
-        f"Servidor: {canal.guild.name}\n"
-        f"Canal: {canal.name}\n"
-        f"Número: {dados.get('numero') or 'Não registrado'}\n"
-        f"Responsável pela abertura: {dados.get('owner_id')}\n"
-        f"Data de abertura: {data_formatada}\n"
-        f"Tempo aberto: {tempo_aberto}\n"
-        f"{'=' * 60}\n\n"
+    numero = dados.get('numero') or 'Não registrado'
+    solicitante = f"ID {dados['owner_id']}" if dados.get('owner_id') else "Não registrado"
+    encerramento = datetime.now(timezone.utc).strftime("%d/%m/%Y às %H:%M:%S UTC")
+    responsavel = str(fechado_por) if fechado_por is not None else "Não registrado"
+
+    cabecalho = (
+        "╔══════════════════════════════════════════════════════════════════════╗\n"
+        "                         HISTÓRICO DE ATENDIMENTO\n"
+        "╚══════════════════════════════════════════════════════════════════════╝\n\n"
+        f"SERVIDOR: {canal.guild.name}\n"
+        f"CANAL: #{canal.name}\n"
+        f"PROTOCOLO: #{numero}\n"
+        f"SOLICITANTE: {solicitante}\n"
+        f"ABERTO EM: {data_formatada}\n"
+        f"TEMPO DE ATENDIMENTO: {tempo_aberto}\n"
+        f"ENCERRADO EM: {encerramento}\n"
+        f"ENCERRADO POR: {responsavel}\n"
+        f"TOTAL DE MENSAGENS: {len(mensagens)}\n\n"
+        f"{'=' * 72}\n"
+        "                         CONVERSA DO TICKET\n"
+        f"{'=' * 72}\n\n"
     )
 
-    conteudo_final += "\n".join(mensagens)
-
-    arquivo = io.BytesIO(
-        conteudo_final.encode("utf-8")
-    )
-
-    numero = dados.get("numero") or "ticket"
-
-    return discord.File(
-        arquivo,
-        filename=f"transcricao-ticket-{numero}.txt"
-    )
+    conteudo_final = cabecalho + ("\n".join(mensagens) if mensagens else "Nenhuma mensagem foi registrada neste ticket.\n")
+    arquivo = io.BytesIO(conteudo_final.encode("utf-8"))
+    return discord.File(arquivo, filename=f"historico-atendimento-{dados.get('numero') or 'ticket'}.txt")
 
 
 async def fechar_ticket(canal, fechado_por):
     if not isinstance(canal, discord.TextChannel):
         return False
 
-    async with locks_fechamento_ticket[canal.id]:
-        if canal.guild.get_channel(canal.id) is None:
-            return False
-        dados = ler_dados_ticket(canal)
-        guild = canal.guild
-        if dados["owner_id"] is None:
-            return False
-        arquivo = None
+    dados = ler_dados_ticket(canal)
+    guild = canal.guild
+    if dados["owner_id"] is None:
+        return False
+
+    arquivo = None
+    try:
+        arquivo = await gerar_transcricao(canal, fechado_por)
+    except Exception as erro:
+        print(f"Erro gerando transcrição: {erro}")
+
+    # Evita enviar duas mensagens caso o solicitante também seja o dono do servidor.
+    destinatarios = {guild.owner_id, dados["owner_id"]}
+    destinatarios.discard(None)
+
+    for user_id in destinatarios:
         try:
-            arquivo = await gerar_transcricao(canal)
+            usuario = await bot.fetch_user(user_id)
+            eh_solicitante = user_id == dados["owner_id"]
+            embed = discord.Embed(
+                title=("✅ Atendimento finalizado" if eh_solicitante else "📋 Relatório de atendimento encerrado"),
+                description=(
+                    "Seu atendimento foi encerrado. O histórico completo da conversa está anexado." 
+                    if eh_solicitante else
+                    "Um ticket foi encerrado no servidor. Confira os dados e o histórico da conversa em anexo."
+                ),
+                color=0x2ECC71,
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="🌐 Servidor", value=guild.name, inline=False)
+            embed.add_field(name="🎫 Ticket", value=f"`#{dados.get('numero') or 'Sem número'}` • `#{canal.name}`", inline=True)
+            embed.add_field(name="👤 Solicitante", value=f"<@{dados['owner_id']}>\n`{dados['owner_id']}`", inline=True)
+            embed.add_field(name="🔒 Encerrado por", value=str(fechado_por), inline=False)
+            embed.add_field(
+                name="📎 Histórico da conversa",
+                value="Arquivo TXT anexado com as mensagens, datas, autores e anexos do atendimento." if arquivo else "Não foi possível gerar o arquivo de histórico.",
+                inline=False
+            )
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+            embed.set_footer(text="Central de Atendimento • Relatório automático")
+
+            if arquivo:
+                arquivo.fp.seek(0)
+                await usuario.send(embed=embed, file=discord.File(arquivo.fp, filename=arquivo.filename))
+            else:
+                await usuario.send(embed=embed)
         except Exception as erro:
-            print(f"Erro gerando transcrição: {erro}")
+            print(f"Não foi possível enviar relatório para {user_id}: {erro}")
 
-        destinatarios = set()
-        if guild.owner_id:
-            destinatarios.add(guild.owner_id)
-        destinatarios.add(dados["owner_id"])
+    try:
+        await canal.delete(reason=f"Ticket fechado por {fechado_por}")
+        return True
+    except Exception as erro:
+        print(f"Erro excluindo ticket: {erro}")
+        return False
 
-        if arquivo:
-            for user_id in destinatarios:
-                try:
-                    usuario = await bot.fetch_user(user_id)
-                    arquivo.fp.seek(0)
-                    await usuario.send(
-                        content=(
-                            f"📄 **Transcrição do ticket "
-                            f"#{dados.get('numero') or 'sem número'}**\\n"
-                            f"Servidor: **{guild.name}**\\n"
-                            f"Fechado por: **{fechado_por}**"
-                        ),
-                        file=discord.File(arquivo.fp, filename=arquivo.filename)
-                    )
-                except Exception as erro:
-                    print(f"Não foi possível enviar transcrição para {user_id}: {erro}")
-
-        try:
-            await canal.delete(reason=f"Ticket fechado por {fechado_por}")
-            return True
-        except Exception as erro:
-            print(f"Erro excluindo ticket: {erro}")
-            return False
 
 # =========================================================
 # ALERTA DE TICKET SEM RESPOSTA
@@ -1613,36 +1607,6 @@ async def antes_verificar_tickets():
     await bot.wait_until_ready()
 
 
-@tasks.loop(minutes=1)
-async def verificar_tickets_inativos():
-    agora = int(time.time())
-    for guild in bot.guilds:
-        for canal in list(guild.text_channels):
-            try:
-                dados = ler_dados_ticket(canal)
-                if not dados.get("owner_id"):
-                    continue
-                ultima = dados.get("atividade_em") or dados.get("aberto_em")
-                if not ultima or agora - ultima < TEMPO_INATIVIDADE_TICKET:
-                    continue
-                await canal.send(
-                    "🔒 Este ticket foi fechado automaticamente por "
-                    "**3 horas sem mensagens**. A transcrição será enviada "
-                    "no privado do autor e do dono do servidor."
-                )
-                await asyncio.sleep(1)
-                await fechar_ticket(canal, "Sistema automático (3h de inatividade)")
-            except discord.NotFound:
-                continue
-            except Exception as erro:
-                print(f"Erro verificando inatividade do ticket {canal.name}: {erro}")
-
-
-@verificar_tickets_inativos.before_loop
-async def antes_verificar_tickets_inativos():
-    await bot.wait_until_ready()
-
-
 # =========================================================
 # MENSAGENS / ANTI-SPAM / COMANDOS
 # =========================================================
@@ -1666,14 +1630,18 @@ async def on_message(message):
 
     dados_ticket = ler_dados_ticket(message.channel)
 
-    if dados_ticket["owner_id"]:
-        alteracoes = {"atividade_em": int(time.time())}
-        if (
-            eh_responsavel_ticket(message.guild, message.author)
-            and not dados_ticket["respondido"]
-        ):
-            alteracoes["respondido"] = True
-        await atualizar_dados_ticket(message.channel, **alteracoes)
+    if (
+        dados_ticket["owner_id"]
+        and eh_responsavel_ticket(
+            message.guild,
+            message.author
+        )
+    ):
+        if not dados_ticket["respondido"]:
+            await atualizar_dados_ticket(
+                message.channel,
+                respondido=True
+            )
 
     # =====================================================
     # COMANDO .f PARA FECHAR TICKET — SOMENTE RESPONSÁVEIS
@@ -1775,82 +1743,53 @@ async def on_message(message):
         return
 
     # =====================================================
-    # ANTI-FLOOD: MENSAGENS E MENÇÕES
+    # ANTI-SPAM
     # =====================================================
 
-    membro = message.author
-    permissoes = membro.guild_permissions
-    if (
-        is_protegido(message.guild, membro.id)
-        or permissoes.administrator
-        or permissoes.manage_messages
-    ):
-        return
-
     agora = time.time()
-    chave = (message.guild.id, membro.id)
 
-    msgs[chave] = [t for t in msgs[chave] if agora - t < 3]
+    chave = (
+        message.guild.id,
+        message.author.id
+    )
+
+    msgs[chave] = [
+        t for t in msgs[chave]
+        if agora - t < 3
+    ]
+
     msgs[chave].append(agora)
 
-    mencoes_msgs[chave] = [
-        item for item in mencoes_msgs[chave]
-        if agora - item[0] < 5
-    ]
-    qtd_mencoes = len(message.mentions)
-    if qtd_mencoes:
-        mencoes_msgs[chave].append((agora, qtd_mencoes))
-
-    total_mencoes = sum(qtd for _, qtd in mencoes_msgs[chave])
-
-    motivo_flood = None
     if len(msgs[chave]) >= 5:
-        motivo_flood = "5 mensagens em 3 segundos"
-    elif qtd_mencoes >= 6:
-        motivo_flood = "6 ou mais pessoas mencionadas em uma mensagem"
-    elif total_mencoes >= 8:
-        motivo_flood = "8 ou mais menções em 5 segundos"
-
-    if motivo_flood:
         msgs[chave].clear()
-        mencoes_msgs[chave].clear()
-
-        ultima_punicao = historico_punicoes_flood.get(chave, 0)
-        repetiu = agora - ultima_punicao <= 60 * 60
-        duracao = timedelta(hours=1) if repetiu else timedelta(minutes=5)
-        descricao_tempo = "1 hora" if repetiu else "5 minutos"
 
         try:
-            await membro.timeout(
-                duracao,
-                reason=f"Anti-Flood: {motivo_flood}"
+            await message.author.timeout(
+                timedelta(minutes=10),
+                reason="Anti-Spam: 5 mensagens em 3 segundos"
             )
-            historico_punicoes_flood[chave] = agora
-
-            try:
-                await message.channel.send(
-                    f"⛔ {membro.mention} recebeu timeout de **{descricao_tempo}** "
-                    f"por flood ({motivo_flood}).",
-                    allowed_mentions=discord.AllowedMentions.none()
-                )
-            except discord.HTTPException:
-                pass
 
             await enviar_log(
                 message.guild,
-                "🚫 Anti-Flood — Timeout",
-                f"**Usuário:** {membro} (`{membro.id}`)\\n"
-                f"**Canal:** {message.channel.mention}\\n"
-                f"**Motivo:** {motivo_flood}\\n"
-                f"**Ação:** Timeout de {descricao_tempo}"
-                + (" (reincidência em até 1 hora)." if repetiu else "."),
+                "💬 Anti-Spam — Mute",
+                f"**Usuário:** {message.author.mention} "
+                f"(`{message.author.id}`)\n"
+                f"**Canal:** {message.channel.mention}\n"
+                "**Ação:** Timeout por 10 minutos",
                 cor=0xFFA500
             )
+
         except discord.Forbidden:
-            print(f"Sem permissão para aplicar timeout em {membro}.")
+            print(
+                f"Sem permissão para aplicar timeout "
+                f"em {message.author}."
+            )
+
         except Exception as erro:
-            print(f"Erro no anti-flood: {erro}")
+            print(f"Erro no anti-spam: {erro}")
+
         return
+
 
 # =========================================================
 # EVENTOS ANTI-NUKE
@@ -2698,47 +2637,73 @@ async def limpar(ctx, *, argumento: str = ""):
 
 
 # =========================================================
-# SISTEMA DE TICKETS — BOTÃO ASSUMIR
+# SISTEMA DE TICKETS — BOTÃO FECHAR
 # =========================================================
 
-class TicketAssumirView(discord.ui.View):
+class TicketCloseView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Assumir ticket",
-        emoji="🙋",
-        style=discord.ButtonStyle.primary,
-        custom_id="ticket_assumir"
+        label="Fechar ticket",
+        emoji="🔒",
+        style=discord.ButtonStyle.danger,
+        custom_id="ticket_fechar"
     )
-    async def assumir_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def fechar_ticket_botao(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
         canal = interaction.channel
         guild = interaction.guild
+
         if guild is None or not isinstance(canal, discord.TextChannel):
             return
 
         dados = ler_dados_ticket(canal)
-        if not dados.get("owner_id"):
-            await interaction.response.send_message("Este canal não é um ticket válido.", ephemeral=True)
-            return
-        if not eh_responsavel_ticket(guild, interaction.user):
-            await interaction.response.send_message("Somente a equipe responsável pode assumir este ticket.", ephemeral=True)
+
+        if not dados["owner_id"]:
+            await interaction.response.send_message(
+                "Este canal não é um ticket válido.",
+                ephemeral=True
+            )
             return
 
-        atual = dados.get("assumido_por")
-        if atual and atual != interaction.user.id:
-            await interaction.response.send_message(f"Este ticket já foi assumido por <@{atual}>.", ephemeral=True)
-            return
-        if atual == interaction.user.id:
-            await interaction.response.send_message("Você já está responsável por este ticket.", ephemeral=True)
+        # Agora pode fechar se for o autor do ticket
+        # OU se for um responsável/administrador.
+        eh_dono_ticket = (
+            interaction.user.id == dados["owner_id"]
+        )
+
+        eh_equipe = eh_responsavel_ticket(
+            guild,
+            interaction.user
+        )
+
+        if not eh_dono_ticket and not eh_equipe:
+            await interaction.response.send_message(
+                "Você não tem permissão para fechar este ticket.",
+                ephemeral=True
+            )
             return
 
-        if not await atualizar_dados_ticket(canal, assumido_por=interaction.user.id):
-            await interaction.response.send_message("Não consegui registrar a responsabilidade. Tente novamente.", ephemeral=True)
-            return
+        await interaction.response.send_message(
+            "🔒 Ticket será fechado. Estou enviando a transcrição no privado.",
+            ephemeral=True
+        )
 
-        await interaction.response.send_message("✅ Você assumiu este ticket.", ephemeral=True)
-        await canal.send(f"🙋 Este ticket foi assumido por {interaction.user.mention}.")
+        try:
+            await canal.send(
+                f"🔒 Ticket fechado por {interaction.user.mention}. "
+                "Estou enviando a transcrição no privado..."
+            )
+        except Exception as erro:
+            print(f"Erro enviando aviso de fechamento: {erro}")
+
+        await asyncio.sleep(2)
+
+        await fechar_ticket(canal, interaction.user)
 
 
 # =========================================================
@@ -2869,8 +2834,6 @@ class TicketPanelView(discord.ui.View):
                 f"|ticket_aberto:{agora}"
                 f"|ticket_alertado:0"
                 f"|ticket_respondido:0"
-                f"|ticket_atividade:{agora}"
-                f"|ticket_assumido_por:0"
             )
 
             ticket_canal = await guild.create_text_channel(
@@ -2882,29 +2845,27 @@ class TicketPanelView(discord.ui.View):
             )
 
             embed = discord.Embed(
-                title=f"🎫 Ticket #{numero}",
+                title=f"🎫 Atendimento #{numero}",
                 description=(
-                    f"Olá {membro.mention}!\n\n"
-                    "Seu atendimento foi aberto com sucesso.\n\n"
-                    "Explique o motivo do seu contato e aguarde "
-                    "a equipe responsável responder.\n\n"
-                    f"**Aberto:** <t:{agora}:R>\n"
-                    f"**Horário:** <t:{agora}:F>\n\n"
-                    "A equipe será avisada caso o ticket fique "
-                    "30 minutos sem resposta.\n"
-                    "Tickets sem mensagens por **3 horas** são fechados automaticamente."
+                    f"Olá, {membro.mention}!\n\n"
+                    "Seu ticket foi criado com sucesso.\n"
+                    "Conte abaixo o que você precisa e aguarde o retorno da equipe.\n\n"
+                    f"🕒 **Criado:** <t:{agora}:R>"
                 ),
-                color=0x2ECC71
+                color=0x5865F2
             )
 
             embed.add_field(
-                name="🙋 Atendimento",
+                name="📌 Informações do atendimento",
                 value=(
-                    "Um responsável pode clicar em **Assumir ticket** "
-                    "para informar que está cuidando do atendimento.\n"
-                    "Quando terminar, a equipe pode fechar usando `.f`.\n"
-                    "A transcrição será enviada no privado do autor."
+                    f"**Solicitante:** {membro.mention}\n"
+                    f"**Protocolo:** `#{numero}`"
                 ),
+                inline=False
+            )
+            embed.add_field(
+                name="📨 Como prosseguir",
+                value="Envie sua mensagem neste canal. Se precisar, você também pode anexar imagens ou arquivos.",
                 inline=False
             )
 
@@ -2912,13 +2873,13 @@ class TicketPanelView(discord.ui.View):
                 embed.set_thumbnail(url=guild.icon.url)
 
             embed.set_footer(
-                text=f"Ticket de {membro} • #{numero}"
+                text=f"{guild.name} • Central de Atendimento"
             )
 
             await ticket_canal.send(
                 content=membro.mention,
                 embed=embed,
-                view=TicketAssumirView()
+                view=TicketCloseView()
             )
 
             await interaction.followup.send(
