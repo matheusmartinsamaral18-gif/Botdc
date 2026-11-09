@@ -3106,7 +3106,7 @@ class TicketPanelView(discord.ui.View):
 
         categoria = canal_painel.category
 
-        nome = membro.name.lower()
+        nome = membro.display_name.lower()
 
         nome = "".join(
             caractere
@@ -3121,7 +3121,7 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
 
             numero = await proximo_numero_ticket(guild.id)
-            nome_canal = f"🎫・{nome} #{numero}"[:100]
+            nome_canal = f"🎫・{nome}-{numero}"[:100]
 
             agora = int(time.time())
 
