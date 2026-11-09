@@ -3286,7 +3286,7 @@ async def ticket_painel(ctx, canal: discord.TextChannel):
     embed = discord.Embed(
         title="🎫 SUPORTE • THEUSSYT COMMUNITY",
         description=(
-            "Abra um ticket para falar com a staff.\n\n"
+            "Precisa de ajuda? Fale com a nossa staff.\n\n"
             "✅ **Faça**\n"
             "> Explique seu problema com detalhes\n"
             "> Envie prints ou vídeos se tiver\n"
@@ -3294,10 +3294,14 @@ async def ticket_painel(ctx, canal: discord.TextChannel):
             "❌ **Evite**\n"
             "> Abrir ticket sem motivo\n"
             "> Marcar a staff várias vezes\n\n"
-            "⏰ Tickets sem resposta fecham em **3 horas**"
+            "📋 Ao fechar, você recebe a transcrição no privado\n"
+            "🔒 Só você e a equipe veem o ticket"
         ),
         color=0x5865F2
     )
+
+    if ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
 
     embed.set_footer(
         text=f"{ctx.guild.name} • Sistema de Tickets"
