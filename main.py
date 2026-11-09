@@ -3205,7 +3205,7 @@ class TicketPanelView(discord.ui.View):
             )
 
             embed = discord.Embed(
-                title=f"🎫 Atendimento #{numero}",
+                title=f"🎫 Atendimento ＃{numero}",
                 description=(
                     f"Olá, {membro.mention}!\n\n"
                     "Seu ticket foi criado com sucesso.\n"
