@@ -3284,11 +3284,17 @@ async def ticket_painel(ctx, canal: discord.TextChannel):
         return
 
     embed = discord.Embed(
-        title="🎫 Central de Atendimento",
+        title="🎫 SUPORTE • THEUSSYT COMMUNITY",
         description=(
-            "Precisa de ajuda ou deseja falar com a equipe?\n\n"
-            "Clique no botão abaixo para abrir um ticket privado.\n"
-            "Nossa equipe poderá atender você por lá."
+            "Abra um ticket para falar com a staff.\n\n"
+            "✅ **Faça**\n"
+            "> Explique seu problema com detalhes\n"
+            "> Envie prints ou vídeos se tiver\n"
+            "> Aguarde a resposta com paciência\n\n"
+            "❌ **Evite**\n"
+            "> Abrir ticket sem motivo\n"
+            "> Marcar a staff várias vezes\n\n"
+            "⏰ Tickets sem resposta fecham em **3 horas**"
         ),
         color=0x5865F2
     )
