@@ -3121,7 +3121,7 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
 
             numero = await proximo_numero_ticket(guild.id)
-            nome_canal = f"🎫・{nome}-#{numero}"[:100]
+            nome_canal = f"🎫・{nome} #{numero}"[:100]
 
             agora = int(time.time())
 
@@ -3205,7 +3205,7 @@ class TicketPanelView(discord.ui.View):
             )
 
             embed = discord.Embed(
-                title=f"🎫 Atendimento ＃{numero}",
+                title=f"🎫 Atendimento #{numero}",
                 description=(
                     f"Olá, {membro.mention}!\n\n"
                     "Seu ticket foi criado com sucesso.\n"
