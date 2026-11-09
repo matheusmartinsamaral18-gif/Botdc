@@ -1272,7 +1272,8 @@ def ler_dados_ticket(canal):
         "alertado": False,
         "respondido": False,
         "assumido_por": None,
-        "ultima_atividade": None
+        "ultima_atividade": None,
+        "ultimo_alerta_msg": None
     }
 
     if not topic:
@@ -1308,6 +1309,9 @@ def ler_dados_ticket(canal):
             elif chave == "ticket_ultima_atividade":
                 dados["ultima_atividade"] = int(valor)
 
+            elif chave == "ticket_ultimo_alerta_msg":
+                dados["ultimo_alerta_msg"] = valor or None
+
         except (ValueError, TypeError):
             pass
 
@@ -1326,7 +1330,8 @@ async def atualizar_dados_ticket(canal, **alteracoes):
         f"ticket_alertado:{1 if dados['alertado'] else 0}",
         f"ticket_respondido:{1 if dados['respondido'] else 0}",
         f"ticket_assumido_por:{dados.get('assumido_por') or 0}",
-        f"ticket_ultima_atividade:{dados.get('ultima_atividade') or dados.get('aberto_em') or int(time.time())}"
+        f"ticket_ultima_atividade:{dados.get('ultima_atividade') or dados.get('aberto_em') or int(time.time())}",
+        f"ticket_ultimo_alerta_msg:{dados.get('ultimo_alerta_msg') or ''}"
     ]
 
     try:
@@ -1558,50 +1563,54 @@ async def verificar_tickets_sem_resposta():
         for canal in list(guild.text_channels):
             try:
                 dados = ler_dados_ticket(canal)
-
                 if not dados["owner_id"]:
                     continue
 
-                if dados["respondido"] or dados["alertado"]:
+                # O alerta depende sempre da última mensagem humana do canal.
+                # Se a última mensagem for da equipe, não há cobrança.
+                ultima_mensagem_humana = None
+                async for mensagem in canal.history(limit=30):
+                    if not mensagem.author.bot:
+                        ultima_mensagem_humana = mensagem
+                        break
+
+                if ultima_mensagem_humana is None:
                     continue
 
-                aberto_em = dados["aberto_em"]
-
-                if not aberto_em:
+                if ultima_mensagem_humana.author.id != dados["owner_id"]:
                     continue
 
-                tempo_aberto = time.time() - aberto_em
-
-                if tempo_aberto < TEMPO_ALERTA_TICKET:
+                mensagem_id = str(ultima_mensagem_humana.id)
+                if dados.get("ultimo_alerta_msg") == mensagem_id:
                     continue
 
-                # Marca como alertado antes das notificações,
-                # evitando mandar várias vezes.
-                await atualizar_dados_ticket(
+                tempo_sem_resposta = (
+                    discord.utils.utcnow() - ultima_mensagem_humana.created_at
+                ).total_seconds()
+                if tempo_sem_resposta < TEMPO_ALERTA_TICKET:
+                    continue
+
+                # Salva o ID antes de notificar para impedir alertas duplicados.
+                atualizado = await atualizar_dados_ticket(
                     canal,
+                    ultimo_alerta_msg=mensagem_id,
                     alertado=True
                 )
+                if not atualizado:
+                    continue
 
-                enviados = await notificar_responsaveis_ticket(
-                    canal,
-                    dados
-                )
+                enviados = await notificar_responsaveis_ticket(canal, dados)
 
                 try:
                     await canal.send(
                         content=(
                             f"<@{dados['owner_id']}> ⏰\n\n"
-                            "Seu ticket está aberto há **30 minutos** "
-                            "e ainda não recebeu uma resposta da equipe.\n\n"
-                            "Enviamos uma mensagem no privado dos "
-                            "administradores e responsáveis para avisá-los "
-                            "sobre seu atendimento."
+                            "Sua última mensagem está aguardando uma resposta "
+                            "da equipe há **30 minutos**. Já avisamos os "
+                            "administradores e responsáveis pelo atendimento."
                         ),
-                        allowed_mentions=discord.AllowedMentions(
-                            users=True
-                        )
+                        allowed_mentions=discord.AllowedMentions(users=True)
                     )
-
                 except Exception as erro:
                     print(f"Erro avisando autor do ticket: {erro}")
 
@@ -1611,9 +1620,7 @@ async def verificar_tickets_sem_resposta():
                 )
 
             except Exception as erro:
-                print(
-                    f"Erro verificando ticket {canal.name}: {erro}"
-                )
+                print(f"Erro verificando ticket {canal.name}: {erro}")
 
 
 @tasks.loop(minutes=1)
@@ -1716,16 +1723,24 @@ async def on_message(message):
 
     if (
         dados_ticket["owner_id"]
-        and eh_responsavel_ticket(
-            message.guild,
-            message.author
-        )
+        and eh_responsavel_ticket(message.guild, message.author)
     ):
-        if not dados_ticket["respondido"]:
-            await atualizar_dados_ticket(
-                message.channel,
-                respondido=True
-            )
+        alteracoes = {"respondido": True}
+
+        # Se ninguém assumiu manualmente, o primeiro responsável que
+        # responder passa a ser o responsável automaticamente.
+        if not dados_ticket.get("assumido_por"):
+            alteracoes["assumido_por"] = message.author.id
+            await atualizar_dados_ticket(message.channel, **alteracoes)
+            try:
+                await message.channel.send(
+                    f"🙋 {message.author.mention} assumiu este atendimento!",
+                    allowed_mentions=discord.AllowedMentions(users=True)
+                )
+            except Exception as erro:
+                print(f"Erro anunciando responsável automático: {erro}")
+        elif not dados_ticket["respondido"]:
+            await atualizar_dados_ticket(message.channel, **alteracoes)
 
     # =====================================================
     # COMANDO .f PARA FECHAR TICKET — SOMENTE RESPONSÁVEIS
@@ -2742,6 +2757,142 @@ async def limpar(ctx, *, argumento: str = ""):
 # SISTEMA DE TICKETS — BOTÃO FECHAR
 # =========================================================
 
+class TicketMemberSelect(discord.ui.UserSelect):
+    def __init__(self, modo):
+        self.modo = modo
+        placeholder = (
+            "Escolha quem adicionar ao ticket..."
+            if modo == "adicionar"
+            else "Escolha quem remover do ticket..."
+        )
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            custom_id=f"ticket_membro_{modo}"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        canal = interaction.channel
+        guild = interaction.guild
+        if guild is None or not isinstance(canal, discord.TextChannel):
+            await interaction.response.send_message(
+                "Canal de ticket inválido.", ephemeral=True
+            )
+            return
+
+        if not eh_responsavel_ticket(guild, interaction.user):
+            await interaction.response.send_message(
+                "Apenas a equipe pode gerenciar participantes.", ephemeral=True
+            )
+            return
+
+        dados = ler_dados_ticket(canal)
+        if not dados.get("owner_id"):
+            await interaction.response.send_message(
+                "Este canal não é um ticket válido.", ephemeral=True
+            )
+            return
+
+        membro = self.values[0]
+        if membro.id == dados["owner_id"]:
+            await interaction.response.send_message(
+                "O solicitante principal não pode ser removido do próprio ticket.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            if self.modo == "adicionar":
+                await canal.set_permissions(
+                    membro,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    attach_files=True,
+                    embed_links=True,
+                    reason=f"Adicionado ao ticket por {interaction.user}"
+                )
+                await interaction.response.send_message(
+                    f"✅ {membro.mention} agora tem acesso a este ticket.",
+                    ephemeral=True
+                )
+            else:
+                await canal.set_permissions(
+                    membro,
+                    overwrite=None,
+                    reason=f"Removido do ticket por {interaction.user}"
+                )
+                await interaction.response.send_message(
+                    f"✅ {membro.mention} foi removido das permissões deste ticket.",
+                    ephemeral=True
+                )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "Não tenho permissão para alterar as permissões deste canal.",
+                ephemeral=True
+            )
+        except Exception as erro:
+            print(f"Erro gerenciando participante do ticket: {erro}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Ocorreu um erro ao atualizar o participante.", ephemeral=True
+                )
+
+
+class TicketMemberSelectView(discord.ui.View):
+    def __init__(self, modo):
+        super().__init__(timeout=180)
+        self.add_item(TicketMemberSelect(modo))
+
+
+class TicketStaffPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(
+        label="Adicionar pessoa",
+        emoji="➕",
+        style=discord.ButtonStyle.success
+    )
+    async def adicionar_pessoa(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not interaction.guild or not eh_responsavel_ticket(
+            interaction.guild, interaction.user
+        ):
+            await interaction.response.send_message(
+                "Apenas a equipe pode usar este painel.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "Selecione a pessoa que terá acesso ao ticket:",
+            view=TicketMemberSelectView("adicionar"),
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Remover pessoa",
+        emoji="➖",
+        style=discord.ButtonStyle.danger
+    )
+    async def remover_pessoa(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not interaction.guild or not eh_responsavel_ticket(
+            interaction.guild, interaction.user
+        ):
+            await interaction.response.send_message(
+                "Apenas a equipe pode usar este painel.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "Selecione a pessoa que perderá o acesso ao ticket:",
+            view=TicketMemberSelectView("remover"),
+            ephemeral=True
+        )
+
+
 class TicketCloseView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2791,14 +2942,64 @@ class TicketCloseView(discord.ui.View):
             )
             return
 
-        await atualizar_dados_ticket(
+        # Reconhece a interação imediatamente para evitar "bot não respondeu".
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        atualizado = await atualizar_dados_ticket(
             canal,
             assumido_por=interaction.user.id,
+            respondido=True,
             ultima_atividade=int(time.time())
         )
-        await interaction.response.send_message(
+        if not atualizado:
+            await interaction.followup.send(
+                "Não consegui salvar quem assumiu o ticket. Tente novamente.",
+                ephemeral=True
+            )
+            return
+
+        await canal.send(
             f"🙋 {interaction.user.mention} assumiu este atendimento!",
             allowed_mentions=discord.AllowedMentions(users=True)
+        )
+        await interaction.followup.send(
+            "Você assumiu este atendimento.", ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Ver painel",
+        emoji="⚙️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket_ver_painel"
+    )
+    async def ver_painel_ticket(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        canal = interaction.channel
+        guild = interaction.guild
+        if guild is None or not isinstance(canal, discord.TextChannel):
+            return
+
+        dados = ler_dados_ticket(canal)
+        if not dados.get("owner_id"):
+            await interaction.response.send_message(
+                "Este canal não é um ticket válido.", ephemeral=True
+            )
+            return
+
+        if not eh_responsavel_ticket(guild, interaction.user):
+            await interaction.response.send_message(
+                "Apenas a equipe pode abrir o painel de gerenciamento.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "⚙️ **Painel de gerenciamento do ticket**\n"
+            "Escolha uma ação abaixo. Este painel é visível somente para você.",
+            view=TicketStaffPanelView(),
+            ephemeral=True
         )
 
     @discord.ui.button(
@@ -2920,7 +3121,7 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
 
             numero = await proximo_numero_ticket(guild.id)
-            nome_canal = f"ticket-{numero}"
+            nome_canal = f"ticket-{nome}-{numero}"[:100]
 
             agora = int(time.time())
 
