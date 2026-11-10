@@ -1063,13 +1063,19 @@ async def on_message(message):
     if message.content.strip().lower() == ".f":
         dados = ler_dados_ticket(message.channel)
         if dados["owner_id"] and eh_responsavel_ticket(message.guild, message.author):
-            try: await message.delete() except Exception: pass
+            try:
+                await message.delete()
+            except Exception:
+                pass
             await fechar_ticket(message.channel, message.author)
             return
 
     if message.content.startswith("!"):
         ctx = await bot.get_context(message)
-        try: await message.delete() except Exception: pass
+        try:
+            await message.delete()
+        except Exception:
+            pass
         if ctx.command is None:
             return
         if ctx.command.qualified_name in ("recursos", "restaurar"):
