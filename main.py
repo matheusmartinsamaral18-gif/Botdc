@@ -638,113 +638,61 @@ async def _enviar_mensagem_restaurada(webhook, item):
     return enviou_algo
 
 
-async def restaurar_mensagens(guild, mapa_novos_canais, canais_alvo_ids=None):
+async def restaurar_mensagens_canal_especifico(guild, canal_alvo):
     """
-    Se canais_alvo_ids for informado, restaura mensagens apenas nesses canais específicos.
-    Caso contrário, restaura em todos os canais do mapa.
+    Restaura as mensagens de um canal específico utilizando o ID atual ou o nome correspondente no backup.
     """
-    resultado = {
-        "canais": 0,
-        "mensagens": 0,
-        "falhas": 0,
-        "sem_canal": 0,
-        "sem_permissao": False
-    }
-
+    resultado = {"mensagens": 0, "falhas": 0, "sem_permissao": False}
     dados = carregar_backup_msgs(guild.id)
     if not dados:
         return resultado
 
-    por_nome = defaultdict(list)
-    for canal in mapa_novos_canais.values():
-        por_nome[canal.name].append(canal)
+    # Procura a chave correspondente ao canal no backup (por ID direto ou por nome)
+    chave_backup = None
+    info_canal = None
 
-    for id_antigo, info in dados.items():
-        try:
-            id_antigo_int = int(id_antigo)
-        except (TypeError, ValueError):
-            id_antigo_int = None
+    # Tenta achar pelo ID atual direto
+    if str(canal_alvo.id) in dados:
+        chave_backup = str(canal_alvo.id)
+        info_canal = dados[chave_backup]
+    else:
+        # Se não achou pelo ID, procura pelo nome do canal
+        for cid, info in dados.items():
+            if info.get("nome") == canal_alvo.name:
+                info_canal = info
+                break
 
-        if canais_alvo_ids is not None and id_antigo_int not in canais_alvo_ids:
-            continue
+    if not info_canal:
+        return resultado
 
-        mensagens = info.get("mensagens") or []
-        if not mensagens:
-            continue
-
-        canal = mapa_novos_canais.get(id_antigo_int)
-
-        if canal is None:
-            candidatos = por_nome.get(info.get("nome"), [])
-            canal = candidatos[0] if len(candidatos) == 1 else None
-
-        if canal is None:
-            resultado["sem_canal"] += 1
-            continue
-
-        canal = guild.get_channel(canal.id)
-        if not isinstance(canal, discord.TextChannel):
-            resultado["sem_canal"] += 1
-            continue
-
-        try:
-            webhook = await canal.create_webhook(
-                name="Restauração",
-                reason="Anti-Nuke: restaurando mensagens"
-            )
-        except discord.Forbidden:
-            resultado["sem_permissao"] = True
-            break
-        except Exception:
-            resultado["falhas"] += len(mensagens)
-            continue
-
-        try:
-            for item in mensagens:
-                if await _enviar_mensagem_restaurada(webhook, item):
-                    resultado["mensagens"] += 1
-                else:
-                    resultado["falhas"] += 1
-            resultado["canais"] += 1
-        finally:
-            try:
-                await webhook.delete(reason="Anti-Nuke: restauração concluída")
-            except Exception:
-                pass
-
-        await asyncio.sleep(1)
-
-    return resultado
-
-
-async def restaurar_mensagens_em_segundo_plano(guild, mapa_novos_canais, canais_alvo_ids=None):
-    restaurando_mensagens.add(guild.id)
+    mensagens = info_canal.get("mensagens") or []
+    if not mensagens:
+        return resultado
 
     try:
-        print(f"💬 Restaurando mensagens em {guild.name}...")
-        r = await restaurar_mensagens(guild, mapa_novos_canais, canais_alvo_ids)
-
-        aviso_perm = (
-            "\n⚠️ Faltou permissão **Gerenciar Webhooks** para restaurar as mensagens."
-            if r["sem_permissao"] else ""
+        webhook = await canal_alvo.create_webhook(
+            name="Restauração",
+            reason="Anti-Nuke: restauração manual de mensagens"
         )
+    except discord.Forbidden:
+        resultado["sem_permissao"] = True
+        return resultado
+    except Exception:
+        return resultado
 
-        await enviar_log(
-            guild,
-            "💬 Mensagens restauradas",
-            (
-                f"**Canais com mensagens devolvidas:** {r['canais']}\n"
-                f"**Mensagens restauradas:** {r['mensagens']}\n"
-                f"**Falhas:** {r['falhas']}\n"
-                f"**Canais sem correspondência:** {r['sem_canal']}"
-                f"{aviso_perm}"
-            ),
-            cor=0x2ECC71
-        )
-    except Exception as erro:
-        print(f"Erro restaurando mensagens: {erro}")
+    try:
+        for item in mensagens:
+            if await _enviar_mensagem_restaurada(webhook, item):
+                resultado["mensagens"] += 1
+            else:
+                resultado["falhas"] += 1
     finally:
-        restaurando_mensagens.discard(guild.id)
+        try:
+            await webhook.delete(reason="Anti-Nuke: restauração concluída")
+        except Exception:
+            pass
+
+    return resultado
 
 
 # =========================================================
@@ -898,60 +846,8 @@ async def criar_canal_backup(guild, dados, mapa_categorias, mapa_cargos=None):
 
 
 # =========================================================
-# VISTA DE SELEÇÃO DE CANAIS PARA MENSAGENS
+# VIEW DE CONFIRMAÇÃO PARA RESTAURAÇÃO DE SERVIDOR
 # =========================================================
-
-class CanalMensagemSelect(discord.ui.Select):
-    def __init__(self, canais_disponiveis):
-        opcoes = [
-            discord.SelectOption(
-                label=f"#{c.name}"[:100],
-                value=str(c.id),
-                description="Restaurar mensagens neste canal"
-            )
-            for c in canais_disponiveis[:25]
-        ]
-        super().__init__(
-            placeholder="Selecione os canais para restaurar mensagens...",
-            min_values=1,
-            max_values=min(len(opcoes), 25),
-            options=opcoes
-        )
-        self.selecionados = []
-
-    async def callback(self, interaction: discord.Interaction):
-        self.selecionados = [int(v) for v in self.values]
-        await interaction.response.send_message(
-            f"✅ {len(self.selecionados)} canais selecionados para restauração de mensagens!",
-            ephemeral=True
-        )
-        self.view.stop()
-
-
-class ModalSelecaoCanaisMensagem(discord.ui.View):
-    def __init__(self, guild):
-        super().__init__(timeout=120)
-        self.guild = guild
-        self.canais_escolhidos = None
-        
-        # Pega todos os canais de texto atuais do servidor
-        canais_lista = guild.text_channels
-        if canais_lista:
-            self.select_comp = CanalMensagemSelect(canais_lista)
-            self.add_item(self.select_comp)
-
-    @discord.ui.button(label="Restaurar em TODOS os canais", style=discord.ButtonStyle.primary, row=1)
-    async def todos(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.canais_escolhidos = None  # None significa todos
-        await interaction.response.send_message("✅ Mensagens serão restauradas em **todos** os canais!", ephemeral=True)
-        self.stop()
-
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
-    async def pular(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.canais_escolhidos = []  # Lista vazia cancela
-        await interaction.response.send_message("❌ Operação cancelada.", ephemeral=True)
-        self.stop()
-
 
 class ConfirmarRestauracaoView(discord.ui.View):
     def __init__(self, ctx):
@@ -1078,7 +974,7 @@ async def executar_restauracao_manual(guild, ctx):
 async def restaurar(ctx):
     if ctx.author.id != get_dono_id(ctx.guild):
         return
-    await ctx.send("Uso correto:\n`!restaurar servidor`\n`!restaurar msg`", delete_after=7)
+    await ctx.send("Uso correto:\n`!restaurar servidor`\n`!restaurar msg #canal`", delete_after=7)
 
 
 @restaurar.command(name="servidor")
@@ -1100,29 +996,25 @@ async def restaurar_servidor(ctx):
 
 
 @restaurar.command(name="msg", aliases=["mensagens"])
-async def restaurar_msg_separado(ctx):
+async def restaurar_msg_canal(ctx, canal: discord.TextChannel = None):
     if ctx.author.id != get_dono_id(ctx.guild):
         await ctx.send("❌ Apenas o dono do servidor pode executar este comando.", delete_after=5)
         return
 
-    # Mapeia os canais atuais do servidor pelo ID atual para o próprio objeto canal
-    mapa_atual = {c.id: c for c in ctx.guild.text_channels}
+    if not canal:
+        await ctx.send("⚠️ Você precisa marcar o canal desejado. Exemplo: `!restaurar msg #geral`", delete_after=7)
+        return
 
-    view_msg = ModalSelecaoCanaisMensagem(ctx.guild)
-    await ctx.send("💬 **Restauração avulsa de mensagens**\nEscolha abaixo onde deseja restaurar as mensagens salvas:", view=view_msg)
-    await view_msg.wait()
+    msg_status = await ctx.send(f"💬 Restaurando mensagens no canal {canal.mention}...")
 
-    canais_escolhidos = view_msg.canais_escolhidos
-    if canais_escolhidos != [] and canais_escolhidos is not None:
-        # Se escolheu canais específicos, monta o dicionário mapeando ID -> Canal
-        mapa_alvo = {cid: mapa_atual[cid] for cid in canais_escolhidos if cid in mapa_atual}
-        asyncio.create_task(restaurar_mensagens_em_segundo_plano(ctx.guild, mapa_alvo, canais_alvo_ids=None))
-        await ctx.send("💬 A restauração das mensagens nos canais selecionados foi iniciada em segundo plano!", delete_after=10)
-    elif canais_escolhidos is None:
-        # Se escolheu "TODOS", passa o mapa completo com todos os canais de texto
-        mapa_todos = {c.id: c for c in ctx.guild.text_channels}
-        asyncio.create_task(restaurar_mensagens_em_segundo_plano(ctx.guild, mapa_todos, canais_alvo_ids=None))
-        await ctx.send("💬 A restauração das mensagens em **todos os canais** foi iniciada em segundo plano!", delete_after=10)
+    resultado = await restaurar_mensagens_canal_especifico(ctx.guild, canal)
+
+    if resultado["sem_permissao"]:
+        await msg_status.edit(content=f"❌ Falhou: O bot não tem permissão de **Gerenciar Webhooks** em {canal.mention}.")
+    elif resultado["mensagens"] > 0:
+        await msg_status.edit(content=f"✅ Sucesso! **{resultado['mensagens']}** mensagens foram restauradas em {canal.mention}.")
+    else:
+        await msg_status.edit(content=f"⚠️ Nenhuma mensagem encontrada no backup para o canal {canal.mention}.")
 
 
 # =========================================================
@@ -1208,7 +1100,7 @@ async def punir_bot_raid(guild, executor_id, motivo):
                 f"**Motivo:** {motivo}\n\n"
                 "🛡️ O bot foi banido, mas **a restauração automática foi desativada**.\n"
                 "Para restaurar o servidor, use o comando: `!restaurar servidor`\n"
-                "Para restaurar apenas as mensagens, use: `!restaurar msg`"
+                "Para restaurar mensagens de um canal, use: `!restaurar msg #canal`"
             ),
             cor=0xE74C3C
         )
@@ -1583,7 +1475,7 @@ async def on_guild_role_delete(role):
 
 
 # =========================================================
-# COMANDOS DE SUPORTE E UTILIDADES
+# COMANDOS DE SUPORTE E UTILIDADES (ATUALIZADO CORRETAMENTE)
 # =========================================================
 
 @bot.command(name="atualizar")
@@ -1594,9 +1486,19 @@ async def atualizar_backup(ctx):
         foto = tirar_foto_guild(ctx.guild)
         salvar_backup_bom(ctx.guild.id, foto)
         salvar_backup_temp(ctx.guild.id, foto)
-        await ctx.send("✅ Backup manual atualizado com sucesso!", delete_after=5)
+        
+        # Dispara também o salvamento das mensagens para atualizar tudo
+        asyncio.create_task(salvar_mensagens_guild(ctx.guild))
+
+        await ctx.send(
+            f"✅ **Backup atualizado com sucesso!**\n"
+            f"📁 **Canais salvos:** {len(foto['canais'])}\n"
+            f"🎭 **Cargos salvos:** {len(foto['cargos'])}\n"
+            f"💬 **Mensagens:** Histórico dos canais atualizado em segundo plano.",
+            delete_after=10
+        )
     except Exception as e:
-        await ctx.send(f"❌ Erro ao atualizar: {e}", delete_after=5)
+        await ctx.send(f"❌ Erro ao atualizar o backup: {e}", delete_after=5)
 
 
 # =========================================================
