@@ -2966,77 +2966,81 @@ async def processar_assumir(interaction):
     asyncio.create_task(_anunciar_assuncao(canal, texto))
 
 
-class TicketMemberSelect(discord.ui.UserSelect):
-    def __init__(self, modo):
-        self.modo = modo
-        placeholder = (
-            "Escolha quem adicionar ao ticket..."
-            if modo == "adicionar"
-            else "Escolha quem remover do ticket..."
+async def _validar_gestao_ticket(interaction):
+    """Confere ticket válido + equipe. Retorna (canal, dados) ou None."""
+
+    canal = interaction.channel
+    guild = interaction.guild
+
+    if guild is None or not isinstance(canal, discord.TextChannel):
+        await interaction.response.send_message(
+            "Canal de ticket inválido.", ephemeral=True
         )
+        return None
+
+    if not eh_responsavel_ticket(guild, interaction.user):
+        await interaction.response.send_message(
+            "Apenas a equipe pode gerenciar participantes.", ephemeral=True
+        )
+        return None
+
+    dados = ler_dados_ticket(canal)
+
+    if not dados.get("owner_id"):
+        await interaction.response.send_message(
+            "Este canal não é um ticket válido.", ephemeral=True
+        )
+        return None
+
+    return canal, dados
+
+
+class TicketMembroSelect(discord.ui.Select):
+    """Lista só com membros que estão dentro do servidor."""
+
+    def __init__(self, membros, modo):
+        self.modo = modo
+
+        opcoes = [
+            discord.SelectOption(
+                label=m.display_name[:100],
+                description=f"@{m.name}"[:100],
+                value=str(m.id)
+            )
+            for m in membros[:25]
+        ]
+
         super().__init__(
-            placeholder=placeholder,
+            placeholder=(
+                "Escolha quem adicionar ao ticket..."
+                if modo == "adicionar"
+                else "Escolha quem remover do ticket..."
+            ),
             min_values=1,
             max_values=1,
-            custom_id=f"ticket_membro_{modo}"
+            options=opcoes
         )
 
     async def callback(self, interaction: discord.Interaction):
-        canal = interaction.channel
+        validado = await _validar_gestao_ticket(interaction)
+
+        if validado is None:
+            return
+
+        canal, dados = validado
         guild = interaction.guild
-        if guild is None or not isinstance(canal, discord.TextChannel):
-            await interaction.response.send_message(
-                "Canal de ticket inválido.", ephemeral=True
-            )
-            return
-
-        if not eh_responsavel_ticket(guild, interaction.user):
-            await interaction.response.send_message(
-                "Apenas a equipe pode gerenciar participantes.", ephemeral=True
-            )
-            return
-
-        dados = ler_dados_ticket(canal)
-        if not dados.get("owner_id"):
-            await interaction.response.send_message(
-                "Este canal não é um ticket válido.", ephemeral=True
-            )
-            return
-
-        alvo_id = self.values[0].id
-        mencao = f"<@{alvo_id}>"
+        alvo_id = int(self.values[0])
         membro = guild.get_member(alvo_id)
 
-        if self.modo == "adicionar":
-            if membro is None:
-                try:
-                    membro = await guild.fetch_member(alvo_id)
-                except discord.HTTPException:
-                    membro = None
-
-            # Só pode adicionar quem realmente está no servidor.
-            if membro is None:
-                await interaction.response.send_message(
-                    "❌ Essa pessoa não está neste servidor. "
-                    "Só é possível adicionar membros do servidor.",
-                    ephemeral=True
-                )
-                return
-
-            if membro.bot:
-                await interaction.response.send_message(
-                    "❌ Não é possível adicionar bots ao ticket.",
-                    ephemeral=True
-                )
-                return
-
-        elif membro is None:
-            # Para remover, aceita quem já saiu do servidor.
-            membro = discord.Object(id=alvo_id)
+        if membro is None:
+            await interaction.response.send_message(
+                "❌ Essa pessoa não está neste servidor.", ephemeral=True
+            )
+            return
 
         if membro.id == dados["owner_id"]:
             await interaction.response.send_message(
-                "O solicitante principal não pode ser removido do próprio ticket.",
+                "O solicitante principal não pode ser alterado no próprio ticket.",
                 ephemeral=True
             )
             return
@@ -3052,20 +3056,17 @@ class TicketMemberSelect(discord.ui.UserSelect):
                     embed_links=True,
                     reason=f"Adicionado ao ticket por {interaction.user}"
                 )
-                await interaction.response.send_message(
-                    f"✅ {mencao} agora tem acesso a este ticket.",
-                    ephemeral=True
-                )
+                texto = f"✅ {membro.mention} agora tem acesso a este ticket."
             else:
                 await canal.set_permissions(
                     membro,
                     overwrite=None,
                     reason=f"Removido do ticket por {interaction.user}"
                 )
-                await interaction.response.send_message(
-                    f"✅ {mencao} foi removido das permissões deste ticket.",
-                    ephemeral=True
-                )
+                texto = f"✅ {membro.mention} foi removido deste ticket."
+
+            await interaction.response.send_message(texto, ephemeral=True)
+
         except discord.Forbidden:
             await interaction.response.send_message(
                 "Não tenho permissão para alterar as permissões deste canal.",
@@ -3075,14 +3076,105 @@ class TicketMemberSelect(discord.ui.UserSelect):
             print(f"Erro gerenciando participante do ticket: {erro}")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    "Ocorreu um erro ao atualizar o participante.", ephemeral=True
+                    "Ocorreu um erro ao atualizar o participante.",
+                    ephemeral=True
                 )
 
 
-class TicketMemberSelectView(discord.ui.View):
-    def __init__(self, modo):
+class TicketMembroSelectView(discord.ui.View):
+    def __init__(self, membros, modo):
         super().__init__(timeout=180)
-        self.add_item(TicketMemberSelect(modo))
+        self.add_item(TicketMembroSelect(membros, modo))
+
+
+class TicketBuscaMembroModal(discord.ui.Modal, title="➕ Adicionar pessoa"):
+    busca = discord.ui.TextInput(
+        label="Nome, @usuário ou ID",
+        placeholder="Ex.: theus",
+        min_length=2,
+        max_length=40
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        validado = await _validar_gestao_ticket(interaction)
+
+        if validado is None:
+            return
+
+        canal, dados = validado
+        guild = interaction.guild
+        termo = str(self.busca.value).strip().lower().lstrip("@")
+
+        resultados = []
+
+        for m in guild.members:
+            if m.bot or m.id == dados["owner_id"]:
+                continue
+
+            nomes = (
+                m.name.lower(),
+                m.display_name.lower(),
+                (m.global_name or "").lower()
+            )
+
+            if (termo.isdigit() and m.id == int(termo)) or any(
+                termo in n for n in nomes
+            ):
+                resultados.append(m)
+
+        resultados.sort(key=lambda m: m.display_name.lower())
+
+        if not resultados:
+            await interaction.response.send_message(
+                f"❌ Não encontrei ninguém no servidor com **{termo}**. "
+                "Só aparecem membros que estão aqui dentro.",
+                ephemeral=True
+            )
+            return
+
+        extra = (
+            f"\n(Mostrando 25 de {len(resultados)}. Digite mais letras "
+            "do nome para filtrar.)"
+            if len(resultados) > 25 else ""
+        )
+
+        await interaction.response.send_message(
+            f"Membros do servidor encontrados:{extra}",
+            view=TicketMembroSelectView(resultados, "adicionar"),
+            ephemeral=True
+        )
+
+
+async def enviar_lista_remover(interaction):
+    validado = await _validar_gestao_ticket(interaction)
+
+    if validado is None:
+        return
+
+    canal, dados = validado
+
+    removiveis = [
+        alvo for alvo in canal.overwrites
+        if isinstance(alvo, discord.Member)
+        and not alvo.bot
+        and alvo.id != dados["owner_id"]
+        and alvo.id != interaction.guild.owner_id
+    ]
+
+    if not removiveis:
+        await interaction.response.send_message(
+            "Não há pessoas adicionadas manualmente neste ticket.",
+            ephemeral=True
+        )
+        return
+
+    removiveis.sort(key=lambda m: m.display_name.lower())
+
+    await interaction.response.send_message(
+        "Escolha quem perderá o acesso ao ticket:",
+        view=TicketMembroSelectView(removiveis, "remover"),
+        ephemeral=True
+    )
 
 
 class TicketStaffPanelView(discord.ui.View):
@@ -3118,11 +3210,7 @@ class TicketStaffPanelView(discord.ui.View):
                 "Apenas a equipe pode usar este painel.", ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            "Selecione a pessoa que terá acesso ao ticket:",
-            view=TicketMemberSelectView("adicionar"),
-            ephemeral=True
-        )
+        await interaction.response.send_modal(TicketBuscaMembroModal())
 
     @discord.ui.button(
         label="Remover pessoa",
@@ -3139,11 +3227,7 @@ class TicketStaffPanelView(discord.ui.View):
                 "Apenas a equipe pode usar este painel.", ephemeral=True
             )
             return
-        await interaction.response.send_message(
-            "Selecione a pessoa que perderá o acesso ao ticket:",
-            view=TicketMemberSelectView("remover"),
-            ephemeral=True
-        )
+        await enviar_lista_remover(interaction)
 
 
 class TicketCloseView(discord.ui.View):
