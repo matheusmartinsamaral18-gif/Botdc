@@ -6,6 +6,7 @@ import json
 import asyncio
 import inspect
 import io
+import re
 from collections import defaultdict
 from datetime import timedelta, datetime, timezone
 
@@ -38,6 +39,7 @@ VIEWS_REGISTRADAS = False
 
 # Locks para evitar dois tickets com o mesmo número.
 locks_tickets = defaultdict(asyncio.Lock)
+locks_backup_mensagens = defaultdict(asyncio.Lock)
 
 
 # =========================================================
@@ -102,6 +104,9 @@ def is_protegido(guild, user_id):
     if user_id == MEU_ID:
         return True
 
+    if bot.user and user_id == bot.user.id:
+        return True
+
     if guild and user_id == get_dono_id(guild):
         return True
 
@@ -138,12 +143,13 @@ def _carregar_arquivo(path):
                 if isinstance(dados, dict):
                     dados.setdefault("canais", [])
                     dados.setdefault("cargos", [])
+                    dados.setdefault("mensagens", {})
                     return dados
 
     except Exception as erro:
         print(f"Erro lendo {path}: {erro}")
 
-    return {"canais": [], "cargos": []}
+    return {"canais": [], "cargos": [], "mensagens": {}}
 
 
 def _salvar_arquivo(path, dados):
@@ -203,6 +209,11 @@ def salvar_backup_temp(guild_id, dados):
 
 
 def salvar_backup_bom(guild_id, dados):
+    # Atualizações da estrutura nunca apagam o histórico de mensagens.
+    dados = dict(dados)
+    if not dados.get("mensagens"):
+        anterior = _carregar_arquivo(backup_bom_path(guild_id))
+        dados["mensagens"] = anterior.get("mensagens", {})
     return _salvar_arquivo(backup_bom_path(guild_id), dados)
 
 
@@ -266,7 +277,8 @@ def snapshot_cargo(role):
 def tirar_foto_guild(guild):
     dados = {
         "canais": [],
-        "cargos": []
+        "cargos": [],
+        "mensagens": {}
     }
 
     for canal in guild.channels:
@@ -399,6 +411,205 @@ async def antes_sync():
 
 
 # =========================================================
+# BACKUP CONTÍNUO DAS ÚLTIMAS 20 MENSAGENS
+# =========================================================
+
+MSG_POR_CANAL = 20
+INTERVALO_BACKUP_MSGS_MIN = 5
+
+
+def arquivo_backup_msgs(guild_id):
+    # O histórico fica dentro do mesmo JSON principal dos canais e cargos.
+    return backup_bom_path(guild_id)
+
+
+def _nome_arquivo_seguro(nome):
+    nome = os.path.basename(str(nome or "anexo"))
+    nome = re.sub(r"[^A-Za-z0-9._-]", "_", nome)
+    return nome[:120] or "anexo"
+
+
+async def _serializar_mensagem(mensagem):
+    anexos = []
+    pasta = os.path.join(
+        "backup_anexos",
+        str(mensagem.guild.id),
+        str(mensagem.channel.id)
+    )
+    os.makedirs(pasta, exist_ok=True)
+
+    for indice, anexo in enumerate(mensagem.attachments[:10]):
+        nome_seguro = _nome_arquivo_seguro(anexo.filename)
+        nome_local = f"{mensagem.id}_{indice}_{nome_seguro}"
+        caminho = os.path.join(pasta, nome_local)
+
+        # O arquivo só é baixado uma vez; os próximos ciclos reutilizam a cópia.
+        limite_download = min(
+            int(getattr(mensagem.guild, "filesize_limit", 25 * 1024 * 1024)),
+            25 * 1024 * 1024
+        )
+        if not os.path.exists(caminho) and anexo.size <= limite_download:
+            try:
+                conteudo_arquivo = await anexo.read()
+                with open(caminho, "wb") as arquivo_local:
+                    arquivo_local.write(conteudo_arquivo)
+            except Exception as erro:
+                print(f"Não foi possível salvar anexo {anexo.filename}: {erro}")
+                caminho = None
+        elif not os.path.exists(caminho):
+            caminho = None
+
+        anexos.append({
+            "filename": anexo.filename,
+            "url": anexo.url,
+            "content_type": anexo.content_type,
+            "size": anexo.size,
+            "local_path": caminho
+        })
+
+    embeds = []
+    for embed in mensagem.embeds:
+        try:
+            embeds.append(embed.to_dict())
+        except Exception:
+            pass
+
+    avatar = None
+    try:
+        avatar = mensagem.author.display_avatar.url
+    except Exception:
+        pass
+
+    return {
+        "id": mensagem.id,
+        "author_id": mensagem.author.id,
+        "author_name": str(mensagem.author),
+        "author_display_name": getattr(mensagem.author, "display_name", str(mensagem.author)),
+        "author_avatar": avatar,
+        "author_is_bot": bool(mensagem.author.bot),
+        "content": mensagem.content or "",
+        "created_at": mensagem.created_at.isoformat(),
+        "attachments": anexos,
+        "embeds": embeds
+    }
+
+
+async def capturar_mensagens_canal(canal):
+    if not isinstance(canal, discord.TextChannel):
+        return []
+
+    mensagens = []
+    try:
+        async for mensagem in canal.history(limit=MSG_POR_CANAL):
+            mensagens.append(await _serializar_mensagem(mensagem))
+        mensagens.reverse()
+    except discord.Forbidden:
+        print(f"Sem permissão para ler histórico em #{canal.name}.")
+        return None
+    except discord.HTTPException as erro:
+        print(f"Erro lendo mensagens de #{canal.name}: {erro}")
+        return None
+
+    return mensagens[-MSG_POR_CANAL:]
+
+
+async def salvar_backup_mensagens_guild(guild):
+    total = 0
+
+    for canal in list(guild.text_channels):
+        try:
+            mensagens_novas = await capturar_mensagens_canal(canal)
+            if mensagens_novas is None:
+                continue
+
+            async with locks_backup_mensagens[guild.id]:
+                dados = carregar_backup(guild.id)
+                historico = dados.setdefault("mensagens", {})
+                anteriores = historico.get(str(canal.id), {}).get("messages", [])
+                por_id = {
+                    str(m.get("id")): m
+                    for m in (anteriores + mensagens_novas)
+                    if m.get("id") is not None
+                }
+                mensagens_consolidadas = sorted(
+                    por_id.values(),
+                    key=lambda m: m.get("created_at", "")
+                )[-MSG_POR_CANAL:]
+
+                historico[str(canal.id)] = {
+                    "channel_id": canal.id,
+                    "channel_name": canal.name,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "messages": mensagens_consolidadas
+                }
+                salvar_backup_bom(guild.id, dados)
+
+            total += len(mensagens_consolidadas)
+            await asyncio.sleep(0.15)
+        except Exception as erro:
+            print(f"Erro no backup de mensagens de #{canal.name}: {erro}")
+
+    print(f"💬 Backup de mensagens atualizado: {guild.name} ({total} mensagens).")
+    return total
+
+@tasks.loop(minutes=INTERVALO_BACKUP_MSGS_MIN)
+async def backup_mensagens_loop():
+    for guild in bot.guilds:
+        try:
+            await salvar_backup_mensagens_guild(guild)
+        except Exception as erro:
+            print(f"Erro no backup periódico de mensagens em {guild.name}: {erro}")
+
+
+@backup_mensagens_loop.before_loop
+async def antes_backup_mensagens():
+    await bot.wait_until_ready()
+
+
+def obter_mensagens_backup(guild_id, canal_id):
+    dados = carregar_backup(guild_id)
+    item = dados.get("mensagens", {}).get(str(canal_id), {})
+    mensagens = item.get("messages", []) if isinstance(item, dict) else []
+    return mensagens[-MSG_POR_CANAL:]
+
+
+async def salvar_mensagem_individual(mensagem):
+    if (
+        mensagem.guild is None
+        or not isinstance(mensagem.channel, discord.TextChannel)
+        or mensagem.webhook_id is not None
+        or (bot.user and mensagem.author.id == bot.user.id)
+    ):
+        return
+
+    nova = await _serializar_mensagem(mensagem)
+    async with locks_backup_mensagens[mensagem.guild.id]:
+        dados = carregar_backup(mensagem.guild.id)
+        historico = dados.setdefault("mensagens", {})
+        chave = str(mensagem.channel.id)
+        item = historico.get(chave, {})
+        anteriores = item.get("messages", []) if isinstance(item, dict) else []
+
+        por_id = {
+            str(m.get("id")): m
+            for m in (anteriores + [nova])
+            if m.get("id") is not None
+        }
+        mensagens = sorted(
+            por_id.values(),
+            key=lambda m: m.get("created_at", "")
+        )[-MSG_POR_CANAL:]
+
+        historico[chave] = {
+            "channel_id": mensagem.channel.id,
+            "channel_name": mensagem.channel.name,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "messages": mensagens
+        }
+        salvar_backup_bom(mensagem.guild.id, dados)
+
+
+# =========================================================
 # LOGS — SOMENTE PARA O DONO DO BOT
 # =========================================================
 
@@ -504,40 +715,39 @@ async def pegar_executor(guild, action, target_id=None, janela=12):
 # =========================================================
 
 def agendar_recuperacao(guild):
+    """
+    Compatibilidade com os eventos antigos do Anti-Nuke.
+    Aguarda o fim da sequência de ataques apenas para limpar o estado.
+    Não recria, apaga ou edita canais/cargos.
+    """
     estado = get_raid(guild.id)
     estado["ultimo_ataque"] = time.time()
 
     tarefa = estado.get("timer")
-
     if tarefa and not tarefa.done():
-        return
+        tarefa.cancel()
 
-    async def esperar_e_restaurar():
+    async def finalizar_modo_raid():
         try:
-            while estado["ativo"]:
-                restante = (
-                    LIMITE_RESTAURACAO
-                    - (time.time() - estado["ultimo_ataque"])
-                )
+            while True:
+                restante = LIMITE_RESTAURACAO - (time.time() - estado["ultimo_ataque"])
+                if restante <= 0:
+                    break
+                await asyncio.sleep(min(restante, 2))
 
-                if restante > 0:
-                    await asyncio.sleep(min(restante, 2))
-                    continue
-
-                await restaurar_tudo(guild)
-                return
-
+            estado["ativo"] = False
+            estado["restaurando"] = False
+            estado["timer"] = None
+            print(f"🛡️ Modo de detecção de raid encerrado em {guild.name}.")
         except asyncio.CancelledError:
             raise
-
         except Exception as erro:
-            print(f"Erro na tarefa de restauração: {erro}")
-
+            print(f"Erro encerrando estado de raid: {erro}")
         finally:
             if estado.get("timer") is asyncio.current_task():
                 estado["timer"] = None
 
-    estado["timer"] = asyncio.create_task(esperar_e_restaurar())
+    estado["timer"] = asyncio.create_task(finalizar_modo_raid())
 
 
 # =========================================================
@@ -698,329 +908,11 @@ async def criar_canal_backup(
 # =========================================================
 
 async def restaurar_tudo(guild):
-    estado = get_raid(guild.id)
-    lock = locks_restauracao[guild.id]
-
-    if lock.locked():
-        return
-
-    async with lock:
-        if not estado["ativo"]:
-            return
-
-        restante = (
-            LIMITE_RESTAURACAO
-            - (time.time() - estado["ultimo_ataque"])
-        )
-
-        if restante > 0:
-            agendar_recuperacao(guild)
-            return
-
-        estado["restaurando"] = True
-
-        print(f"♻️ Começando restauração COMPLETA em {guild.name}...")
-
-        backup = carregar_backup(guild.id)
-
-        canais_apagados = 0
-        canais_restaurados = 0
-        cargos_restaurados = 0
-        erros_permissao = 0
-
-        if not backup["canais"] and not backup["cargos"]:
-            print("❌ Backup vazio! Restauração cancelada.")
-            estado["restaurando"] = False
-            estado["ativo"] = False
-
-            await enviar_log(
-                guild,
-                "❌ Restauração cancelada",
-                (
-                    "A proteção detectou uma raid, mas o backup BOM "
-                    "está vazio. Não foi possível restaurar os canais "
-                    "e cargos automaticamente."
-                ),
-                cor=0xE74C3C
-            )
-            return
-
-        salvar_mapa_canais(guild.id, {})
-        estado["canais_criados_pelo_bot"].clear()
-
-        # =================================================
-        # FASE 1 — APAGAR TODOS OS CANAIS
-        # =================================================
-
-        print("🗑️ Apagando todos os canais do servidor...")
-
-        canais_existentes = list(guild.channels)
-
-        canais_existentes.sort(
-            key=lambda c: isinstance(c, discord.CategoryChannel)
-        )
-
-        for canal in canais_existentes:
-            try:
-                await canal.delete(
-                    reason=(
-                        "Anti-Nuke: limpeza completa para restauração do backup"
-                    )
-                )
-
-                canais_apagados += 1
-                print(f"🗑️ Apagado: {canal.name}")
-                await asyncio.sleep(0.5)
-
-            except discord.NotFound:
-                pass
-
-            except discord.Forbidden as erro:
-                erros_permissao += 1
-                print(f"Sem permissão para apagar {canal.name}: {erro}")
-
-            except discord.HTTPException as erro:
-                print(f"Erro apagando {canal.name}: {erro}")
-                await asyncio.sleep(2)
-
-        await asyncio.sleep(2)
-
-        # =================================================
-        # FASE 2 — RECRIAR / MAPEAR CARGOS ANTES DOS CANAIS
-        # =================================================
-
-        print("🎭 Verificando e recriando cargos...")
-
-        mapa_cargos = {}
-
-        cargos_por_nome = {
-            role.name: role
-            for role in guild.roles
-            if role.name != "@everyone"
-        }
-
-        for dados in backup["cargos"]:
-            id_antigo = int(dados.get("id", 0))
-            nome = dados.get("name")
-
-            if not nome:
-                continue
-
-            cargo = guild.get_role(id_antigo)
-
-            if cargo is None:
-                cargo = cargos_por_nome.get(nome)
-
-            if cargo is None:
-                try:
-                    cargo = await guild.create_role(
-                        name=nome,
-                        colour=discord.Colour(dados["color"]),
-                        hoist=dados["hoist"],
-                        mentionable=dados["mentionable"],
-                        permissions=discord.Permissions(
-                            dados["permissions"]
-                        ),
-                        reason="Anti-Nuke: restauração do backup BOM"
-                    )
-
-                    cargos_restaurados += 1
-                    cargos_por_nome[nome] = cargo
-
-                    print(f"🎭 Cargo restaurado: {nome}")
-                    await asyncio.sleep(0.5)
-
-                except discord.Forbidden as erro:
-                    erros_permissao += 1
-                    print(f"Sem permissão para recriar cargo {nome}: {erro}")
-                    continue
-
-                except Exception as erro:
-                    print(f"Erro recriando cargo {nome}: {erro}")
-                    continue
-
-            mapa_cargos[id_antigo] = cargo
-            mapa_cargos[str(id_antigo)] = cargo
-
-        # =================================================
-        # FASE 3 — RECRIAR CATEGORIAS
-        # =================================================
-
-        print("♻️ Recriando categorias do backup...")
-
-        mapa_categorias = {}
-
-        categorias = [
-            c for c in backup["canais"]
-            if "category" in c.get("type", "")
-        ]
-
-        demais = [
-            c for c in backup["canais"]
-            if "category" not in c.get("type", "")
-        ]
-
-        for dados in categorias:
-            try:
-                novo = await criar_canal_backup(
-                    guild,
-                    dados,
-                    mapa_categorias,
-                    mapa_cargos
-                )
-
-                canais_restaurados += 1
-                print(f"♻️ Categoria restaurada: {novo.name}")
-                await asyncio.sleep(0.7)
-
-            except discord.Forbidden as erro:
-                erros_permissao += 1
-                print(
-                    f"Sem permissão para criar categoria "
-                    f"{dados.get('name')}: {erro}"
-                )
-
-            except Exception as erro:
-                print(
-                    f"Erro recriando categoria "
-                    f"{dados.get('name')}: {erro}"
-                )
-
-        # =================================================
-        # FASE 4 — RECRIAR OS DEMAIS CANAIS
-        # =================================================
-
-        print("♻️ Recriando canais do backup...")
-
-        for dados in demais:
-            try:
-                novo = await criar_canal_backup(
-                    guild,
-                    dados,
-                    mapa_categorias,
-                    mapa_cargos
-                )
-
-                canais_restaurados += 1
-                print(f"♻️ Canal restaurado: {novo.name}")
-                await asyncio.sleep(0.7)
-
-            except discord.Forbidden as erro:
-                erros_permissao += 1
-                print(
-                    f"Sem permissão para recriar "
-                    f"{dados.get('name')}: {erro}"
-                )
-
-            except Exception as erro:
-                print(
-                    f"Erro recriando canal "
-                    f"{dados.get('name')}: {erro}"
-                )
-
-        # =================================================
-        # FASE 5 — VARREDURA DE CANAIS EXTRAS
-        # =================================================
-
-        print("🔎 Verificando canais que sobraram...")
-
-        for rodada in range(5):
-            await asyncio.sleep(2)
-
-            ids_do_bot = set(estado["canais_criados_pelo_bot"])
-
-            canais_sobrando = [
-                canal
-                for canal in list(guild.channels)
-                if canal.id not in ids_do_bot
-            ]
-
-            if not canais_sobrando:
-                print("✅ Nenhum canal extra encontrado.")
-                break
-
-            print(
-                f"⚠️ Encontrados {len(canais_sobrando)} "
-                f"canais extras. Removendo..."
-            )
-
-            for canal in canais_sobrando:
-                try:
-                    await canal.delete(
-                        reason=(
-                            "Anti-Nuke: removendo canal criado durante a restauração"
-                        )
-                    )
-
-                    canais_apagados += 1
-                    print(f"🗑️ Canal extra removido: {canal.name}")
-                    await asyncio.sleep(0.5)
-
-                except discord.NotFound:
-                    pass
-
-                except discord.Forbidden as erro:
-                    erros_permissao += 1
-                    print(f"Sem permissão para remover canal extra: {erro}")
-
-                except discord.HTTPException as erro:
-                    print(f"Erro na varredura: {erro}")
-                    await asyncio.sleep(2)
-
-        # =================================================
-        # FASE 6 — VERIFICAR SE A RAID CONTINUA
-        # =================================================
-
-        if (
-            time.time() - estado["ultimo_ataque"]
-            < LIMITE_RESTAURACAO
-        ):
-            estado["restaurando"] = False
-            agendar_recuperacao(guild)
-            return
-
-        # =================================================
-        # FASE 7 — RELATÓRIO PRIVADO PARA O DONO DO BOT
-        # =================================================
-
-        try:
-            await enviar_log(
-                guild,
-                "🛡️ RAID FINALIZADA — RESTAURAÇÃO CONCLUÍDA",
-                (
-                    f"**Responsável identificado:** "
-                    f"{estado['raider_nome']} "
-                    f"(`{estado['raider_id']}`)\n\n"
-                    f"**Ações detectadas:** {estado['qtd_ataques']}\n"
-                    f"**Canais apagados durante a recuperação:** "
-                    f"{canais_apagados}\n"
-                    f"**Canais restaurados:** {canais_restaurados}\n"
-                    f"**Cargos restaurados:** {cargos_restaurados}\n"
-                    f"**Falhas de permissão:** {erros_permissao}\n\n"
-                    "O sistema concluiu a tentativa de restauração "
-                    "com os dados disponíveis no backup BOM."
-                ),
-                cor=0x2ECC71
-            )
-
-        except Exception as erro:
-            print(f"Erro enviando relatório privado: {erro}")
-
-        # =================================================
-        # FINALIZAR RAID
-        # =================================================
-
-        raid_state[guild.id] = novo_estado_raid()
-        raid_state[guild.id]["ultimo_ataque"] = time.time()
-
-        try:
-            foto_limpa = tirar_foto_guild(guild)
-            salvar_backup_temp(guild.id, foto_limpa)
-
-        except Exception as erro:
-            print(f"Erro atualizando backup TEMP: {erro}")
-
-        print(f"✅ Restauração completa finalizada em {guild.name}")
+    """
+    Compatibilidade com chamadas antigas.
+    A restauração agora é manual e não apaga canais/cargos existentes.
+    """
+    return await restaurar_estrutura_manual(guild)
 
 
 # =========================================================
@@ -1029,6 +921,9 @@ async def restaurar_tudo(guild):
 
 async def punir(guild, executor_id, motivo):
     if guild is None or executor_id is None:
+        return False
+
+    if bot.user and executor_id == bot.user.id:
         return False
 
     if is_protegido(guild, executor_id):
@@ -1074,9 +969,10 @@ async def punir(guild, executor_id, motivo):
                 f"**Possível responsável:** {estado['raider_nome']} "
                 f"(`{executor_id}`)\n"
                 f"**Primeira ação identificada:** {motivo}\n\n"
-                "🛡️ O Anti-Nuke foi ativado e está monitorando "
-                "novas ações. A restauração será iniciada após "
-                "o período sem novos ataques."
+                "🛡️ O Anti-Nuke foi ativado. O invasor será punido "
+                "e os eventos serão registrados. Nenhuma restauração "
+                "automática será executada; use `!restaurar` quando quiser."
+
             ),
             cor=0xE74C3C
         )
@@ -1191,6 +1087,17 @@ async def on_ready():
     if not sync_backup_loop.is_running():
         sync_backup_loop.start()
 
+    if not backup_mensagens_loop.is_running():
+        backup_mensagens_loop.start()
+
+    # Na primeira inicialização, cria também o histórico inicial de mensagens.
+    for guild in bot.guilds:
+        try:
+            if not carregar_backup(guild.id).get("mensagens"):
+                await salvar_backup_mensagens_guild(guild)
+        except Exception as erro:
+            print(f"Erro no backup inicial de mensagens ({guild.name}): {erro}")
+
     if not verificar_tickets_sem_resposta.is_running():
         verificar_tickets_sem_resposta.start()
 
@@ -1205,6 +1112,7 @@ async def on_guild_join(guild):
 
         salvar_backup_bom(guild.id, foto)
         salvar_backup_temp(guild.id, foto)
+        await salvar_backup_mensagens_guild(guild)
 
         print(f"📸 Novo servidor, backup criado: {guild.name}")
 
@@ -1774,6 +1682,14 @@ async def antes_verificar_tickets():
 # MENSAGENS / ANTI-SPAM / COMANDOS
 # =========================================================
 
+@bot.listen("on_message")
+async def backup_mensagem_listener(message):
+    try:
+        await salvar_mensagem_individual(message)
+    except Exception as erro:
+        print(f"Erro salvando mensagem individual: {erro}")
+
+
 @bot.event
 async def on_message(message):
     if message.author.bot or message.guild is None:
@@ -2099,103 +2015,30 @@ async def on_guild_channel_delete(channel):
         channel.id
     )
 
-    if estado["restaurando"]:
-        if executor is None:
-            return
-
-        if bot.user and executor == bot.user.id:
-            return
-
-    if estado["ativo"]:
-        estado["canais_apagados_ids"].add(channel.id)
-
-        if executor is not None:
-            if bot.user and executor == bot.user.id:
-                return
-
-            if not is_protegido(guild, executor):
-                if executor == estado["raider_id"]:
-                    if registrou("canal_del", executor, 2, 3):
-                        await punir(
-                            guild,
-                            executor,
-                            "Deletou 2 canais em 3 segundos"
-                        )
-
-        estado["ultimo_ataque"] = time.time()
-        agendar_recuperacao(guild)
+    # Nunca recria canais automaticamente. Apenas registra e pune.
+    if executor and bot.user and executor == bot.user.id:
         return
 
     if executor and not is_protegido(guild, executor):
-        if registrou("canal_del", executor, 2, 3):
+        if estado["ativo"] or registrou("canal_del", executor, 2, 3):
+            estado["canais_apagados_ids"].add(channel.id)
             await punir(
                 guild,
                 executor,
-                "Deletou 2 canais em 3 segundos"
+                "Deletou canal / possível tentativa de nuke"
             )
+            await enviar_log(
+                guild,
+                "🗑️ Canal excluído — restauração manual necessária",
+                f"**Canal:** #{channel.name} (`{channel.id}`)\\n"
+                f"**Executor:** <@{executor}> (`{executor}`)\\n"
+                "**Ação:** invasor punido; nenhuma restauração automática foi executada.",
+                cor=0xE74C3C
+            )
+        return
 
-        if get_raid(guild.id)["ativo"]:
-            estado = get_raid(guild.id)
-            estado["canais_apagados_ids"].add(channel.id)
-            agendar_recuperacao(guild)
-            return
-
-        try:
-            categoria = channel.category
-            overwrites = channel.overwrites
-
-            if isinstance(channel, discord.TextChannel):
-                novo = await guild.create_text_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    topic=channel.topic,
-                    slowmode_delay=channel.slowmode_delay,
-                    nsfw=channel.nsfw,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke"
-                )
-
-            elif isinstance(channel, discord.VoiceChannel):
-                novo = await guild.create_voice_channel(
-                    name=channel.name,
-                    category=categoria,
-                    position=channel.position,
-                    bitrate=channel.bitrate,
-                    user_limit=channel.user_limit,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke"
-                )
-
-            elif isinstance(channel, discord.CategoryChannel):
-                novo = await guild.create_category(
-                    name=channel.name,
-                    position=channel.position,
-                    overwrites=overwrites,
-                    reason="BACKUP Anti-Nuke"
-                )
-
-            else:
-                novo = None
-
-            if novo:
-                print(
-                    f"♻️ BACKUP: Canal #{channel.name} recriado!"
-                )
-
-                await enviar_log(
-                    guild,
-                    "♻️ Backup — Canal Recriado",
-                    f"**Canal:** #{channel.name}\n"
-                    f"**Deletado por:** <@{executor}> (`{executor}`)\n"
-                    "**Ação:** Canal recriado automaticamente",
-                    cor=0x2ECC71
-                )
-
-        except Exception as erro:
-            print(f"Erro backup canal: {erro}")
-
-    else:
+    # Alterações legítimas feitas por pessoas protegidas atualizam o backup TEMP.
+    if executor and is_protegido(guild, executor):
         try:
             remover_canal_do_backup_temp(guild.id, channel.id)
         except Exception as erro:
@@ -2283,7 +2126,6 @@ async def on_guild_role_create(role):
 @bot.event
 async def on_guild_role_delete(role):
     guild = role.guild
-
     executor = await pegar_executor(
         guild,
         discord.AuditLogAction.role_delete,
@@ -2291,54 +2133,35 @@ async def on_guild_role_delete(role):
     )
 
     estado = get_raid(guild.id)
-
-    if estado["ativo"]:
-        estado["cargos_apagados"].append(role.name)
-        estado["ultimo_ataque"] = time.time()
-        agendar_recuperacao(guild)
-        return
-
     if executor and bot.user and executor == bot.user.id:
         return
 
     if executor and not is_protegido(guild, executor):
-        if registrou("cargo_del", executor, 2, 3):
+        if estado["ativo"] or registrou("cargo_del", executor, 2, 3):
+            estado["cargos_apagados"].append(role.name)
             await punir(
                 guild,
                 executor,
-                "Deletou 2 cargos em 3 segundos"
+                "Deletou cargo / possível tentativa de nuke"
             )
-
-        if get_raid(guild.id)["ativo"]:
-            agendar_recuperacao(guild)
-            return
-
-        try:
-            await guild.create_role(
-                name=role.name,
-                colour=role.colour,
-                hoist=role.hoist,
-                mentionable=role.mentionable,
-                permissions=role.permissions,
-                reason="BACKUP Anti-Nuke"
+            await enviar_log(
+                guild,
+                "🎭 Cargo excluído — restauração manual necessária",
+                f"**Cargo:** {role.name} (`{role.id}`)\\n"
+                f"**Executor:** <@{executor}> (`{executor}`)\\n"
+                "**Ação:** invasor punido; nenhuma restauração automática foi executada.",
+                cor=0xE74C3C
             )
+        return
 
-            print(f"♻️ BACKUP: Cargo {role.name} recriado!")
-
-        except Exception as erro:
-            print(f"Erro backup cargo: {erro}")
-
-    else:
+    if executor and is_protegido(guild, executor):
         try:
             dados = carregar_backup_temp(guild.id)
-
             dados["cargos"] = [
                 x for x in dados["cargos"]
                 if x.get("id") != role.id
             ]
-
             salvar_backup_temp(guild.id, dados)
-
         except Exception as erro:
             print(f"Erro removendo cargo do TEMP: {erro}")
 
@@ -2387,10 +2210,26 @@ async def on_guild_role_update(antes, depois):
 async def on_webhooks_update(channel):
     guild = channel.guild
 
+    # Ignora o evento disparado pela criação de webhook feita pelo próprio bot.
+    try:
+        webhooks_atuais = await channel.webhooks()
+        agora = discord.utils.utcnow()
+        if any(
+            webhook.user and bot.user and webhook.user.id == bot.user.id
+            and (agora - webhook.created_at).total_seconds() < 20
+            for webhook in webhooks_atuais
+        ):
+            return
+    except Exception:
+        pass
+
     executor = await pegar_executor(
         guild,
         discord.AuditLogAction.webhook_create
     )
+
+    if executor and bot.user and executor == bot.user.id:
+        return
 
     if executor and not is_protegido(guild, executor):
         try:
@@ -2499,32 +2338,19 @@ async def on_guild_update(antes, depois):
     if not executor or is_protegido(depois, executor):
         return
 
-    try:
-        icone_bytes = (
-            await antes.icon.read()
-            if mudou_icone and antes.icon
-            else None
-        )
-
-        kwargs = {"name": antes.name}
-
-        if mudou_icone:
-            kwargs["icon"] = icone_bytes
-
-        await depois.edit(
-            reason="Anti-Nuke: restaurando nome/ícone",
-            **kwargs
-        )
-
-    except Exception as erro:
-        print(f"Erro restaurando nome/ícone: {erro}")
+    alteracoes = []
+    if mudou_nome:
+        alteracoes.append(f"nome: `{antes.name}` → `{depois.name}`")
+    if mudou_icone:
+        alteracoes.append("ícone do servidor")
 
     await enviar_log(
         depois,
-        "🏷️ Nome/Ícone Alterado",
-        f"**Por:** <@{executor}> (`{executor}`)\n"
-        "**Ação:** tentativa de alteração revertida",
-        cor=0xFFA500
+        "🏷️ Nome/ícone do servidor alterado",
+        f"**Executor:** <@{executor}> (`{executor}`)\\n"
+        f"**Alterações:** {', '.join(alteracoes)}\\n"
+        "**Ação:** invasor punido. A reversão é manual.",
+        cor=0xE74C3C
     )
 
     await punir(
@@ -2661,11 +2487,13 @@ async def atualizar_backup(ctx, *, arg: str = ""):
 
         salvar_backup_bom(ctx.guild.id, foto)
         salvar_backup_temp(ctx.guild.id, foto)
+        total_mensagens = await salvar_backup_mensagens_guild(ctx.guild)
 
         await ctx.send(
             f"✅ Backup atualizado! "
-            f"**{len(foto['canais'])} canais** "
-            f"e **{len(foto['cargos'])} cargos** salvos.",
+            f"**{len(foto['canais'])} canais**, "
+            f"**{len(foto['cargos'])} cargos** e "
+            f"**{total_mensagens} mensagens** salvos.",
             delete_after=8
         )
 
@@ -2679,6 +2507,449 @@ async def atualizar_backup(ctx, *, arg: str = ""):
             f"❌ Erro ao atualizar backup: {erro}",
             delete_after=8
         )
+
+
+# =========================================================
+# RESTAURAÇÃO MANUAL — SEM AÇÕES AUTOMÁTICAS
+# =========================================================
+
+def _mapa_categorias_existentes(guild, backup):
+    mapa = {}
+    por_nome = {c.name: c for c in guild.categories}
+    for item in backup.get("canais", []):
+        if "category" not in item.get("type", ""):
+            continue
+        categoria = guild.get_channel(int(item.get("id", 0)))
+        if not isinstance(categoria, discord.CategoryChannel):
+            categoria = por_nome.get(item.get("name"))
+        if categoria:
+            mapa[item.get("id")] = categoria
+            mapa[str(item.get("id"))] = categoria
+    return mapa
+
+
+async def restaurar_estrutura_manual(guild):
+    backup = carregar_backup(guild.id)
+    if not backup.get("canais") and not backup.get("cargos"):
+        return {"canais": 0, "cargos": 0, "erros": 1}
+
+    estado = get_raid(guild.id)
+    estado["restaurando"] = True
+    canais_criados = 0
+    cargos_criados = 0
+    erros = 0
+
+    try:
+        mapa_cargos = {}
+        cargos_por_nome = {r.name: r for r in guild.roles if r.name != "@everyone"}
+
+        # Recria somente cargos ausentes; não apaga nem rebaixa cargos atuais.
+        for item in backup.get("cargos", []):
+            nome = item.get("name")
+            if not nome:
+                continue
+            cargo = guild.get_role(int(item.get("id", 0))) or cargos_por_nome.get(nome)
+            if cargo is None:
+                try:
+                    cargo = await guild.create_role(
+                        name=nome,
+                        colour=discord.Colour(int(item.get("color", 0))),
+                        hoist=bool(item.get("hoist", False)),
+                        mentionable=bool(item.get("mentionable", False)),
+                        permissions=discord.Permissions(int(item.get("permissions", 0))),
+                        reason="Restauração manual de backup"
+                    )
+                    cargos_criados += 1
+                    cargos_por_nome[nome] = cargo
+                    await asyncio.sleep(0.35)
+                except Exception as erro:
+                    erros += 1
+                    print(f"Erro recriando cargo {nome}: {erro}")
+                    continue
+            mapa_cargos[item.get("id")] = cargo
+            mapa_cargos[str(item.get("id"))] = cargo
+
+        mapa_categorias = _mapa_categorias_existentes(guild, backup)
+        itens = backup.get("canais", [])
+        categorias = [x for x in itens if "category" in x.get("type", "")]
+        demais = [x for x in itens if "category" not in x.get("type", "")]
+
+        # Categorias primeiro.
+        for item in categorias:
+            atual = guild.get_channel(int(item.get("id", 0)))
+            if isinstance(atual, discord.CategoryChannel):
+                mapa_categorias[item.get("id")] = atual
+                mapa_categorias[str(item.get("id"))] = atual
+                continue
+            if any(c.name == item.get("name") for c in guild.categories):
+                atual = next(c for c in guild.categories if c.name == item.get("name"))
+                registrar_novo_id_canal(guild.id, item.get("id"), atual.id)
+                mapa_categorias[item.get("id")] = atual
+                mapa_categorias[str(item.get("id"))] = atual
+                continue
+            try:
+                novo = await criar_canal_backup(guild, item, mapa_categorias, mapa_cargos)
+                mapa_categorias[item.get("id")] = novo
+                mapa_categorias[str(item.get("id"))] = novo
+                canais_criados += 1
+                await asyncio.sleep(0.4)
+            except Exception as erro:
+                erros += 1
+                print(f"Erro recriando categoria {item.get('name')}: {erro}")
+
+        # Canais que não são categorias.
+        for item in demais:
+            atual = guild.get_channel(int(item.get("id", 0)))
+            if atual is not None:
+                continue
+            # Evita duplicar um canal que tenha sido recriado com outro ID.
+            tipo = item.get("type", "")
+            existente = next(
+                (c for c in guild.channels
+                 if c.name == item.get("name") and str(c.type) == tipo),
+                None
+            )
+            if existente:
+                registrar_novo_id_canal(guild.id, item.get("id"), existente.id)
+                continue
+            try:
+                novo = await criar_canal_backup(guild, item, mapa_categorias, mapa_cargos)
+                canais_criados += 1
+                await asyncio.sleep(0.4)
+            except Exception as erro:
+                erros += 1
+                print(f"Erro recriando canal {item.get('name')}: {erro}")
+
+    finally:
+        estado["restaurando"] = False
+
+    return {"canais": canais_criados, "cargos": cargos_criados, "erros": erros}
+
+
+async def _obter_webhook_restauracao(canal):
+    try:
+        webhooks = await canal.webhooks()
+        for webhook in webhooks:
+            if webhook.user and bot.user and webhook.user.id == bot.user.id:
+                return webhook
+        return await canal.create_webhook(
+            name="Backup de mensagens",
+            reason="Webhook para restauração manual do histórico"
+        )
+    except discord.Forbidden:
+        return None
+
+
+def obter_id_backup_canal(guild_id, canal):
+    if canal is None:
+        return None
+    mapa = carregar_mapa_canais(guild_id)
+    for id_antigo, id_novo in mapa.items():
+        try:
+            if int(id_novo) == canal.id:
+                return int(id_antigo)
+        except (TypeError, ValueError):
+            continue
+    return canal.id
+
+
+async def restaurar_mensagens_canal(canal, backup_channel_id=None):
+    id_backup = backup_channel_id or obter_id_backup_canal(canal.guild.id, canal)
+    mensagens = obter_mensagens_backup(canal.guild.id, id_backup)
+    if not mensagens:
+        return 0, "Não há mensagens salvas para este canal."
+
+    webhook = await _obter_webhook_restauracao(canal)
+    restauradas = 0
+
+    for item in mensagens:
+        autor = (
+            item.get("author_display_name")
+            or item.get("author_name")
+            or "Usuário"
+        )
+        avatar = item.get("author_avatar")
+        conteudo = item.get("content", "") or ""
+
+        links_anexos = []
+        arquivos_abertos = []
+        arquivos_discord = []
+
+        for anexo in item.get("attachments", [])[:10]:
+            nome = anexo.get("filename", "anexo")
+            caminho = anexo.get("local_path")
+            if caminho and os.path.isfile(caminho):
+                try:
+                    arquivo_local = open(caminho, "rb")
+                    arquivos_abertos.append(arquivo_local)
+                    arquivos_discord.append(
+                        discord.File(arquivo_local, filename=nome)
+                    )
+                    continue
+                except Exception as erro:
+                    print(f"Erro abrindo anexo salvo {nome}: {erro}")
+
+            url = anexo.get("url")
+            if url:
+                links_anexos.append(f"[📎 {nome}]({url})")
+
+        if links_anexos:
+            conteudo = (conteudo + "\\n" if conteudo else "") + "\\n".join(links_anexos)
+
+        embeds = []
+        for dado_embed in item.get("embeds", [])[:10]:
+            try:
+                embeds.append(discord.Embed.from_dict(dado_embed))
+            except Exception:
+                pass
+
+        if not conteudo.strip() and not embeds:
+            conteudo = "[Mensagem sem texto ou conteúdo incorporado]"
+
+        try:
+            if webhook:
+                await webhook.send(
+                    content=conteudo[:2000] if conteudo else None,
+                    username=str(autor)[:80],
+                    avatar_url=avatar,
+                    embeds=embeds or None,
+                    files=arquivos_discord or None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    wait=True
+                )
+            else:
+                await canal.send(
+                    f"**{discord.utils.escape_markdown(str(autor)[:80])}:** "
+                    f"{conteudo[:1700]}",
+                    embeds=embeds or None,
+                    files=arquivos_discord or None,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+            restauradas += 1
+            await asyncio.sleep(0.25)
+        except discord.HTTPException as erro:
+            print(f"Erro restaurando mensagem no canal {canal.id}: {erro}")
+        finally:
+            for arquivo_local in arquivos_abertos:
+                try:
+                    arquivo_local.close()
+                except Exception:
+                    pass
+
+    return restauradas, None
+
+
+async def restaurar_mensagens_todos_canais(guild):
+    # Recria canais/categorias que tenham sido apagados antes de reenviar mensagens.
+    await restaurar_estrutura_manual(guild)
+    dados = carregar_backup(guild.id)
+    total = 0
+    canais_sem_historico = 0
+
+    for id_canal, item in dados.get("mensagens", {}).items():
+        canal = guild.get_channel(int(id_canal))
+        if not isinstance(canal, discord.TextChannel):
+            canal = resolver_canal_configurado(guild, int(id_canal))
+        if not isinstance(canal, discord.TextChannel):
+            nome_salvo = item.get("channel_name") if isinstance(item, dict) else None
+            canal = discord.utils.get(guild.text_channels, name=nome_salvo) if nome_salvo else None
+        if not isinstance(canal, discord.TextChannel):
+            canais_sem_historico += 1
+            continue
+        qtd, erro = await restaurar_mensagens_canal(
+            canal, backup_channel_id=int(id_canal)
+        )
+        total += qtd
+        await asyncio.sleep(0.3)
+
+    return total, canais_sem_historico
+
+
+class ConfirmarRestauracaoTudoView(discord.ui.View):
+    def __init__(self, guild_id, solicitante_id):
+        super().__init__(timeout=90)
+        self.guild_id = guild_id
+        self.solicitante_id = solicitante_id
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or interaction.guild.id != self.guild_id
+            or interaction.user.id != self.solicitante_id
+            or interaction.user.id != interaction.guild.owner_id
+        ):
+            await interaction.response.send_message(
+                "Somente o dono que iniciou esta restauração pode confirmar.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Confirmar restauração",
+        emoji="♻️",
+        style=discord.ButtonStyle.danger
+    )
+    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.stop()
+        resultado = await restaurar_estrutura_manual(interaction.guild)
+        qtd_msgs, canais_ignorados = await restaurar_mensagens_todos_canais(interaction.guild)
+        await interaction.followup.send(
+            "✅ **Restauração manual finalizada.**\n"
+            f"• Canais recriados: **{resultado['canais']}**\n"
+            f"• Cargos recriados: **{resultado['cargos']}**\n"
+            f"• Mensagens reenviadas: **{qtd_msgs}**\n"
+            f"• Canais do backup indisponíveis: **{canais_ignorados}**\n"
+            f"• Erros na estrutura: **{resultado['erros']}**\n\n"
+            "Os canais e cargos atuais não foram apagados.",
+            ephemeral=True
+        )
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Restauração cancelada. Nenhuma alteração foi feita.",
+            view=self
+        )
+
+
+@bot.command(name="restaurar")
+async def restaurar(ctx, *, argumento: str = ""):
+    if ctx.guild is None or ctx.author.id != ctx.guild.owner_id:
+        return
+
+    argumento = (argumento or "").strip()
+    normalizado = " ".join(argumento.lower().split())
+
+    if normalizado in ("", "ajuda", "help"):
+        await ctx.send(
+            "**Comandos de restauração manual:**\n"
+            "• `!restaurar tudo` — canais, cargos e mensagens (com confirmação)\n"
+            "• `!restaurar canal #canal` — restaura a configuração do canal\n"
+            "• `!restaurar msg deste canal` — mensagens do canal atual\n"
+            "• `!restaurar msg de todos canais` — mensagens de todos os canais\n"
+            "• `!restaurar msg do #canal` — mensagens de um canal específico"
+        )
+        return
+
+    if normalizado == "tudo":
+        view = ConfirmarRestauracaoTudoView(ctx.guild.id, ctx.author.id)
+        await ctx.send(
+            "⚠️ **Confirma a restauração do backup inteiro?**\n"
+            "Isso recria cargos e canais ausentes e reenvia as mensagens salvas. "
+            "Os canais e cargos atuais não serão apagados.",
+            view=view
+        )
+        return
+
+    if normalizado == "msg deste canal":
+        qtd, erro = await restaurar_mensagens_canal(ctx.channel)
+        await ctx.send(
+            erro or f"✅ {qtd} mensagens reenviadas em {ctx.channel.mention}."
+        )
+        return
+
+    if normalizado == "msg de todos canais":
+        qtd, ignorados = await restaurar_mensagens_todos_canais(ctx.guild)
+        await ctx.send(
+            f"✅ **{qtd} mensagens** reenviadas. "
+            f"Canais sem correspondência: **{ignorados}**."
+        )
+        return
+
+    if normalizado.startswith("msg do "):
+        canal = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else None
+        if canal is None:
+            nome = argumento[7:].strip().lstrip("#")
+            canal = discord.utils.get(ctx.guild.text_channels, name=nome)
+        if not isinstance(canal, discord.TextChannel):
+            await ctx.send("❌ Não encontrei esse canal. Use `!restaurar msg do #canal`.")
+            return
+        qtd, erro = await restaurar_mensagens_canal(canal)
+        await ctx.send(
+            erro or f"✅ {qtd} mensagens reenviadas em {canal.mention}."
+        )
+        return
+
+    if normalizado.startswith("canal "):
+        canal = ctx.message.channel_mentions[0] if ctx.message.channel_mentions else None
+        nome = argumento[6:].strip().lstrip("#")
+        if canal is None:
+            canal = discord.utils.get(ctx.guild.text_channels, name=nome)
+        backup = carregar_backup(ctx.guild.id)
+        item = next(
+            (x for x in backup.get("canais", [])
+             if (canal and int(x.get("id", 0)) == canal.id)
+             or x.get("name", "").lower() == nome.lower()),
+            None
+        )
+        if item is None:
+            await ctx.send("❌ Não encontrei esse canal no backup.")
+            return
+
+        if canal is None:
+            mapa_categorias = _mapa_categorias_existentes(ctx.guild, backup)
+            mapa_cargos = {
+                int(r.get("id", 0)): ctx.guild.get_role(int(r.get("id", 0)))
+                for r in backup.get("cargos", [])
+                if ctx.guild.get_role(int(r.get("id", 0))) is not None
+            }
+            try:
+                novo = await criar_canal_backup(
+                    ctx.guild, item, mapa_categorias, mapa_cargos
+                )
+                await ctx.send(f"✅ Canal recriado: {novo.mention}")
+            except Exception as erro:
+                await ctx.send(f"❌ Não foi possível recriar o canal: {erro}")
+            return
+
+        try:
+            categoria = None
+            categoria_id = item.get("category_id")
+            if categoria_id:
+                categoria = ctx.guild.get_channel(int(categoria_id))
+                if not isinstance(categoria, discord.CategoryChannel):
+                    categoria = next(
+                        (c for c in ctx.guild.categories
+                         if c.name == next(
+                             (x.get("name") for x in backup.get("canais", [])
+                              if x.get("id") == categoria_id),
+                             None
+                         )),
+                        None
+                    )
+            overwrites = construir_overwrites(
+                ctx.guild, item.get("overwrites", [])
+            )
+            kwargs = {
+                "name": item.get("name", canal.name),
+                "overwrites": overwrites,
+                "reason": "Restauração manual da configuração do canal"
+            }
+            if isinstance(canal, discord.TextChannel):
+                kwargs.update({
+                    "topic": item.get("topic"),
+                    "slowmode_delay": item.get("slowmode", 0),
+                    "nsfw": item.get("nsfw", False),
+                    "category": categoria
+                })
+            await canal.edit(**kwargs)
+            await ctx.send(f"✅ Configuração do canal atualizada: {canal.mention}")
+        except Exception as erro:
+            await ctx.send(f"❌ Não foi possível restaurar o canal: {erro}")
+        return
+
+    await ctx.send("❌ Comando não reconhecido. Use `!restaurar` para ver as opções.")
 
 
 # =========================================================
@@ -3850,6 +4121,106 @@ class EscolherCanalPainelTicket(discord.ui.ChannelSelect):
         await _rodar_comando_painel(interaction, ticket_painel, canal)
 
 
+class EscolherCanalRestaurar(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Escolha o canal para restaurar as mensagens...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        canal = interaction.guild.get_channel(self.values[0].id)
+        if not isinstance(canal, discord.TextChannel):
+            await interaction.response.send_message(
+                "Canal inválido.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        qtd, erro = await restaurar_mensagens_canal(canal)
+        await interaction.followup.send(
+            erro or f"✅ {qtd} mensagens restauradas em {canal.mention}.",
+            ephemeral=True
+        )
+
+
+class RestauracaoMenuView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(EscolherCanalRestaurar())
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or interaction.user.id != interaction.guild.owner_id
+        ):
+            await interaction.response.send_message(
+                "Apenas o dono do servidor pode usar esta restauração.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Restaurar tudo",
+        emoji="♻️",
+        style=discord.ButtonStyle.danger,
+        row=1
+    )
+    async def restaurar_tudo_botao(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        view = ConfirmarRestauracaoTudoView(
+            interaction.guild.id, interaction.user.id
+        )
+        await interaction.response.send_message(
+            "⚠️ Confirma restaurar canais, cargos e mensagens do backup?",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Mensagens deste canal",
+        emoji="💬",
+        style=discord.ButtonStyle.primary,
+        row=1
+    )
+    async def restaurar_atual(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Abra o painel em um canal de texto para usar esta opção.",
+                ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        qtd, erro = await restaurar_mensagens_canal(interaction.channel)
+        await interaction.followup.send(
+            erro or f"✅ {qtd} mensagens restauradas neste canal.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Mensagens de todos",
+        emoji="📚",
+        style=discord.ButtonStyle.success,
+        row=1
+    )
+    async def restaurar_todas_mensagens(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        qtd, ignorados = await restaurar_mensagens_todos_canais(interaction.guild)
+        await interaction.followup.send(
+            f"✅ {qtd} mensagens restauradas. "
+            f"Canais sem correspondência: {ignorados}.",
+            ephemeral=True
+        )
+
+
 class PainelDonoView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -3902,6 +4273,18 @@ class PainelDonoView(discord.ui.View):
     async def b_backup(self, interaction: discord.Interaction,
                        button: discord.ui.Button):
         await _rodar_comando_painel(interaction, atualizar_backup, arg="")
+
+    @discord.ui.button(label="Restaurar backup", emoji="♻️", row=1,
+                       style=discord.ButtonStyle.primary)
+    async def b_restaurar(self, interaction: discord.Interaction,
+                          button: discord.ui.Button):
+        await interaction.response.send_message(
+            "♻️ **Restauração manual**\\n"
+            "Escolha se deseja restaurar tudo, as mensagens deste canal, "
+            "as mensagens de todos os canais ou selecione um canal específico.",
+            view=RestauracaoMenuView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Painel de tickets", emoji="📨", row=1,
                        style=discord.ButtonStyle.success)
