@@ -1155,14 +1155,14 @@ class ConfirmarRestauracaoTudoView(discord.ui.View):
         self.value = None
 
     @discord.ui.button(label="Sim, Restaurar", style=discord.ButtonStyle.danger, emoji="⚠️")
-    def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.ctx.author.id:
             return interaction.response.send_message("Apenas o dono pode confirmar.", ephemeral=True)
         self.value = True
         self.stop()
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
-    def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.ctx.author.id:
             return interaction.response.send_message("Apenas o dono pode cancelar.", ephemeral=True)
         self.value = False
