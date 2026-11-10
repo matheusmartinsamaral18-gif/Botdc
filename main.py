@@ -2694,7 +2694,7 @@ async def restaurar_mensagens_canal(canal, backup_channel_id=None):
                 links_anexos.append(f"[📎 {nome}]({url})")
 
         if links_anexos:
-            conteudo = (conteudo + "\\n" if conteudo else "") + "\\n".join(links_anexos)
+            conteudo = (conteudo + "\n" if conteudo else "") + "\n".join(links_anexos)
 
         embeds = []
         for dado_embed in item.get("embeds", [])[:10]:
@@ -2712,8 +2712,8 @@ async def restaurar_mensagens_canal(canal, backup_channel_id=None):
                     content=conteudo[:2000] if conteudo else None,
                     username=str(autor)[:80],
                     avatar_url=avatar,
-                    embeds=embeds or None,
-                    files=arquivos_discord or None,
+                    embeds=embeds if embeds else None,
+                    files=arquivos_discord if arquivos_discord else None,
                     allowed_mentions=discord.AllowedMentions.none(),
                     wait=True
                 )
@@ -2721,8 +2721,8 @@ async def restaurar_mensagens_canal(canal, backup_channel_id=None):
                 await canal.send(
                     f"**{discord.utils.escape_markdown(str(autor)[:80])}:** "
                     f"{conteudo[:1700]}",
-                    embeds=embeds or None,
-                    files=arquivos_discord or None,
+                    embeds=embeds if embeds else None,
+                    files=arquivos_discord if arquivos_discord else None,
                     allowed_mentions=discord.AllowedMentions.none()
                 )
             restauradas += 1
