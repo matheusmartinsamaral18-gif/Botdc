@@ -639,24 +639,15 @@ async def _enviar_mensagem_restaurada(webhook, item):
 
 
 async def restaurar_mensagens_canal_especifico(guild, canal_alvo):
-    """
-    Restaura as mensagens de um canal específico utilizando o ID atual ou o nome correspondente no backup.
-    """
     resultado = {"mensagens": 0, "falhas": 0, "sem_permissao": False}
     dados = carregar_backup_msgs(guild.id)
     if not dados:
         return resultado
 
-    # Procura a chave correspondente ao canal no backup (por ID direto ou por nome)
-    chave_backup = None
     info_canal = None
-
-    # Tenta achar pelo ID atual direto
     if str(canal_alvo.id) in dados:
-        chave_backup = str(canal_alvo.id)
-        info_canal = dados[chave_backup]
+        info_canal = dados[str(canal_alvo.id)]
     else:
-        # Se não achou pelo ID, procura pelo nome do canal
         for cid, info in dados.items():
             if info.get("nome") == canal_alvo.name:
                 info_canal = info
@@ -845,10 +836,6 @@ async def criar_canal_backup(guild, dados, mapa_categorias, mapa_cargos=None):
     return novo
 
 
-# =========================================================
-# VIEW DE CONFIRMAÇÃO PARA RESTAURAÇÃO DE SERVIDOR
-# =========================================================
-
 class ConfirmarRestauracaoView(discord.ui.View):
     def __init__(self, ctx):
         super().__init__(timeout=60)
@@ -1006,7 +993,6 @@ async def restaurar_msg_canal(ctx, canal: discord.TextChannel = None):
         return
 
     msg_status = await ctx.send(f"💬 Restaurando mensagens no canal {canal.mention}...")
-
     resultado = await restaurar_mensagens_canal_especifico(ctx.guild, canal)
 
     if resultado["sem_permissao"]:
@@ -1100,7 +1086,7 @@ async def punir_bot_raid(guild, executor_id, motivo):
                 f"**Motivo:** {motivo}\n\n"
                 "🛡️ O bot foi banido, mas **a restauração automática foi desativada**.\n"
                 "Para restaurar o servidor, use o comando: `!restaurar servidor`\n"
-                "Para restaurar mensagens de um canal, use: `!restaurar msg #canal`"
+                "Para restaurar mensagens, use: `!restaurar msg #canal`"
             ),
             cor=0xE74C3C
         )
@@ -1475,10 +1461,10 @@ async def on_guild_role_delete(role):
 
 
 # =========================================================
-# COMANDOS DE SUPORTE E UTILIDADES (ATUALIZADO CORRETAMENTE)
+# COMANDOS DE SUPORTE E UTILIDADES (COM APELIDOS DE BACKUP)
 # =========================================================
 
-@bot.command(name="atualizar")
+@bot.command(name="atualizar", aliases=["backup", "salvar"])
 async def atualizar_backup(ctx):
     if ctx.author.id != get_dono_id(ctx.guild):
         return
@@ -1487,14 +1473,14 @@ async def atualizar_backup(ctx):
         salvar_backup_bom(ctx.guild.id, foto)
         salvar_backup_temp(ctx.guild.id, foto)
         
-        # Dispara também o salvamento das mensagens para atualizar tudo
+        # Dispara também o salvamento das mensagens em segundo plano
         asyncio.create_task(salvar_mensagens_guild(ctx.guild))
 
         await ctx.send(
             f"✅ **Backup atualizado com sucesso!**\n"
             f"📁 **Canais salvos:** {len(foto['canais'])}\n"
             f"🎭 **Cargos salvos:** {len(foto['cargos'])}\n"
-            f"💬 **Mensagens:** Histórico dos canais atualizado em segundo plano.",
+            f"💬 **Mensagens:** Histórico dos canais atualizado.",
             delete_after=10
         )
     except Exception as e:
