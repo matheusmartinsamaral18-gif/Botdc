@@ -1257,7 +1257,7 @@ async def proximo_numero_ticket(guild_id):
         return numero
 
 
-def ler_dados_ticket(canal):
+def _ler_dados_topic(canal):
     """
     Lê os dados do ticket pelo topic.
     Também aceita o formato antigo ticket_owner:ID.
@@ -1273,7 +1273,8 @@ def ler_dados_ticket(canal):
         "respondido": False,
         "assumido_por": None,
         "ultima_atividade": None,
-        "ultimo_alerta_msg": None
+        "ultimo_alerta_msg": None,
+        "msg_controle_id": None
     }
 
     if not topic:
@@ -1318,25 +1319,102 @@ def ler_dados_ticket(canal):
     return dados
 
 
-async def atualizar_dados_ticket(canal, **alteracoes):
-    dados = ler_dados_ticket(canal)
+# Estado dinâmico dos tickets (assumido, atividade, alertas...).
+# Antes isso era gravado no tópico do canal, e o Discord limita muito
+# a edição de canais (cerca de 2 edições a cada 10 minutos), por isso
+# assumir/enviar mensagem demorava. Agora fica em arquivo + memória,
+# o que é instantâneo. O tópico continua com os dados fixos do ticket.
+ARQUIVO_ESTADO_TICKETS = "estado_tickets.json"
+CAMPOS_ESTADO_TICKET = (
+    "alertado",
+    "respondido",
+    "assumido_por",
+    "ultima_atividade",
+    "ultimo_alerta_msg",
+    "msg_controle_id"
+)
+estado_tickets = {}
 
-    dados.update(alteracoes)
 
-    partes = [
-        f"ticket_owner:{dados['owner_id']}",
-        f"ticket_numero:{dados['numero']}",
-        f"ticket_aberto:{dados['aberto_em']}",
-        f"ticket_alertado:{1 if dados['alertado'] else 0}",
-        f"ticket_respondido:{1 if dados['respondido'] else 0}",
-        f"ticket_assumido_por:{dados.get('assumido_por') or 0}",
-        f"ticket_ultima_atividade:{dados.get('ultima_atividade') or dados.get('aberto_em') or int(time.time())}",
-        f"ticket_ultimo_alerta_msg:{dados.get('ultimo_alerta_msg') or ''}"
-    ]
+def _carregar_estado_tickets():
+    global estado_tickets
 
     try:
-        await canal.edit(topic="|".join(partes))
+        if os.path.exists(ARQUIVO_ESTADO_TICKETS):
+            with open(ARQUIVO_ESTADO_TICKETS, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+
+            if isinstance(dados, dict):
+                estado_tickets = dados
+
+    except Exception as erro:
+        print(f"Erro lendo estado dos tickets: {erro}")
+
+
+def _salvar_estado_tickets():
+    temporario = ARQUIVO_ESTADO_TICKETS + ".tmp"
+
+    try:
+        with open(temporario, "w", encoding="utf-8") as f:
+            json.dump(estado_tickets, f, ensure_ascii=False)
+
+        os.replace(temporario, ARQUIVO_ESTADO_TICKETS)
         return True
+
+    except Exception as erro:
+        print(f"Erro salvando estado dos tickets: {erro}")
+        return False
+
+
+def limpar_estado_tickets_orfaos():
+    """Remove do arquivo o estado de tickets cujo canal não existe mais."""
+
+    if not bot.guilds:
+        return
+
+    existentes = {
+        str(canal.id)
+        for guild in bot.guilds
+        for canal in guild.channels
+    }
+
+    orfaos = [k for k in estado_tickets if k not in existentes]
+
+    if orfaos:
+        for chave in orfaos:
+            estado_tickets.pop(chave, None)
+
+        _salvar_estado_tickets()
+
+
+_carregar_estado_tickets()
+
+
+def ler_dados_ticket(canal):
+    """Dados fixos vêm do tópico; dados que mudam vêm do estado salvo."""
+
+    dados = _ler_dados_topic(canal)
+
+    if dados["owner_id"]:
+        extra = estado_tickets.get(str(canal.id))
+
+        if extra:
+            for campo in CAMPOS_ESTADO_TICKET:
+                if campo in extra:
+                    dados[campo] = extra[campo]
+
+    return dados
+
+
+async def atualizar_dados_ticket(canal, **alteracoes):
+    try:
+        item = estado_tickets.setdefault(str(canal.id), {})
+
+        for chave, valor in alteracoes.items():
+            if chave in CAMPOS_ESTADO_TICKET:
+                item[chave] = valor
+
+        return _salvar_estado_tickets()
 
     except Exception as erro:
         print(f"Erro atualizando dados do ticket: {erro}")
@@ -1628,6 +1706,11 @@ async def fechar_tickets_por_inatividade():
     """Fecha tickets que ficam 3 horas sem nenhuma nova mensagem."""
     agora = int(time.time())
 
+    try:
+        limpar_estado_tickets_orfaos()
+    except Exception as erro:
+        print(f"Erro limpando estado de tickets: {erro}")
+
     for guild in bot.guilds:
         for canal in list(guild.text_channels):
             try:
@@ -1732,13 +1815,12 @@ async def on_message(message):
         if not dados_ticket.get("assumido_por"):
             alteracoes["assumido_por"] = message.author.id
             await atualizar_dados_ticket(message.channel, **alteracoes)
-            try:
-                await message.channel.send(
-                    f"🙋 {message.author.mention} assumiu este atendimento!",
-                    allowed_mentions=discord.AllowedMentions(users=True)
+            asyncio.create_task(
+                _anunciar_assuncao(
+                    message.channel,
+                    f"🙋 {message.author.mention} assumiu este atendimento!"
                 )
-            except Exception as erro:
-                print(f"Erro anunciando responsável automático: {erro}")
+            )
         elif not dados_ticket["respondido"]:
             await atualizar_dados_ticket(message.channel, **alteracoes)
 
@@ -2757,6 +2839,133 @@ async def limpar(ctx, *, argumento: str = ""):
 # SISTEMA DE TICKETS — BOTÃO FECHAR
 # =========================================================
 
+async def atualizar_mensagem_controle(canal):
+    """
+    Atualiza a mensagem principal do ticket: mostra o responsável e
+    remove o botão "Assumir ticket" enquanto o ticket está assumido.
+    """
+
+    try:
+        dados = ler_dados_ticket(canal)
+        mensagem = None
+        mid = dados.get("msg_controle_id")
+
+        if mid:
+            try:
+                mensagem = await canal.fetch_message(int(mid))
+            except discord.NotFound:
+                mensagem = None
+
+        if mensagem is None:
+            async for m in canal.history(limit=15, oldest_first=True):
+                if (
+                    bot.user
+                    and m.author.id == bot.user.id
+                    and m.embeds
+                    and (m.embeds[0].title or "").startswith("🎫 Atendimento")
+                ):
+                    mensagem = m
+                    await atualizar_dados_ticket(
+                        canal,
+                        msg_controle_id=m.id
+                    )
+                    break
+
+        if mensagem is None:
+            return
+
+        assumido = dados.get("assumido_por")
+        embed = mensagem.embeds[0].copy() if mensagem.embeds else None
+
+        if embed is not None:
+            for i, campo in enumerate(list(embed.fields)):
+                if campo.name == "🙋 Responsável":
+                    embed.remove_field(i)
+                    break
+
+            if assumido:
+                embed.add_field(
+                    name="🙋 Responsável",
+                    value=f"<@{assumido}>",
+                    inline=False
+                )
+
+        await mensagem.edit(
+            embed=embed,
+            view=TicketCloseView(assumido=bool(assumido))
+        )
+
+    except Exception as erro:
+        print(f"Erro atualizando mensagem do ticket: {erro}")
+
+
+async def _anunciar_assuncao(canal, texto):
+    try:
+        await canal.send(
+            texto,
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
+    except Exception as erro:
+        print(f"Erro anunciando responsável: {erro}")
+
+    await atualizar_mensagem_controle(canal)
+
+
+async def processar_assumir(interaction):
+    canal = interaction.channel
+    guild = interaction.guild
+
+    if guild is None or not isinstance(canal, discord.TextChannel):
+        return
+
+    dados = ler_dados_ticket(canal)
+
+    if not dados["owner_id"]:
+        await interaction.response.send_message(
+            "Este canal não é um ticket válido.", ephemeral=True
+        )
+        return
+
+    if not eh_responsavel_ticket(guild, interaction.user):
+        await interaction.response.send_message(
+            "Apenas a equipe de atendimento pode assumir tickets.",
+            ephemeral=True
+        )
+        return
+
+    anterior = dados.get("assumido_por")
+
+    if anterior == interaction.user.id:
+        await interaction.response.send_message(
+            "Você já está responsável por este ticket.", ephemeral=True
+        )
+        return
+
+    # Reconhece a interação na hora, antes de qualquer outra coisa.
+    await interaction.response.defer(ephemeral=True)
+
+    await atualizar_dados_ticket(
+        canal,
+        assumido_por=interaction.user.id,
+        respondido=True,
+        ultima_atividade=int(time.time())
+    )
+
+    if anterior:
+        texto = (
+            f"🔄 {interaction.user.mention} assumiu este atendimento "
+            f"no lugar de <@{anterior}>!"
+        )
+    else:
+        texto = f"🙋 {interaction.user.mention} assumiu este atendimento!"
+
+    await interaction.followup.send(
+        "Você assumiu este atendimento.", ephemeral=True
+    )
+
+    asyncio.create_task(_anunciar_assuncao(canal, texto))
+
+
 class TicketMemberSelect(discord.ui.UserSelect):
     def __init__(self, modo):
         self.modo = modo
@@ -2794,7 +3003,37 @@ class TicketMemberSelect(discord.ui.UserSelect):
             )
             return
 
-        membro = self.values[0]
+        alvo_id = self.values[0].id
+        mencao = f"<@{alvo_id}>"
+        membro = guild.get_member(alvo_id)
+
+        if self.modo == "adicionar":
+            if membro is None:
+                try:
+                    membro = await guild.fetch_member(alvo_id)
+                except discord.HTTPException:
+                    membro = None
+
+            # Só pode adicionar quem realmente está no servidor.
+            if membro is None:
+                await interaction.response.send_message(
+                    "❌ Essa pessoa não está neste servidor. "
+                    "Só é possível adicionar membros do servidor.",
+                    ephemeral=True
+                )
+                return
+
+            if membro.bot:
+                await interaction.response.send_message(
+                    "❌ Não é possível adicionar bots ao ticket.",
+                    ephemeral=True
+                )
+                return
+
+        elif membro is None:
+            # Para remover, aceita quem já saiu do servidor.
+            membro = discord.Object(id=alvo_id)
+
         if membro.id == dados["owner_id"]:
             await interaction.response.send_message(
                 "O solicitante principal não pode ser removido do próprio ticket.",
@@ -2814,7 +3053,7 @@ class TicketMemberSelect(discord.ui.UserSelect):
                     reason=f"Adicionado ao ticket por {interaction.user}"
                 )
                 await interaction.response.send_message(
-                    f"✅ {membro.mention} agora tem acesso a este ticket.",
+                    f"✅ {mencao} agora tem acesso a este ticket.",
                     ephemeral=True
                 )
             else:
@@ -2824,7 +3063,7 @@ class TicketMemberSelect(discord.ui.UserSelect):
                     reason=f"Removido do ticket por {interaction.user}"
                 )
                 await interaction.response.send_message(
-                    f"✅ {membro.mention} foi removido das permissões deste ticket.",
+                    f"✅ {mencao} foi removido das permissões deste ticket.",
                     ephemeral=True
                 )
         except discord.Forbidden:
@@ -2847,8 +3086,22 @@ class TicketMemberSelectView(discord.ui.View):
 
 
 class TicketStaffPanelView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, mostrar_assumir=True):
         super().__init__(timeout=180)
+
+        # Quem já é o responsável não vê o botão de assumir.
+        if not mostrar_assumir:
+            self.remove_item(self.assumir_no_painel)
+
+    @discord.ui.button(
+        label="Assumir ticket",
+        emoji="🙋",
+        style=discord.ButtonStyle.primary
+    )
+    async def assumir_no_painel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await processar_assumir(interaction)
 
     @discord.ui.button(
         label="Adicionar pessoa",
@@ -2894,8 +3147,13 @@ class TicketStaffPanelView(discord.ui.View):
 
 
 class TicketCloseView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, assumido=False):
         super().__init__(timeout=None)
+
+        # Com o ticket assumido, o botão público some. Outros admins
+        # podem assumir por cima pelo "Ver painel".
+        if assumido:
+            self.remove_item(self.assumir_ticket_botao)
 
     @discord.ui.button(
         label="Assumir ticket",
@@ -2908,62 +3166,7 @@ class TicketCloseView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        canal = interaction.channel
-        guild = interaction.guild
-
-        if guild is None or not isinstance(canal, discord.TextChannel):
-            return
-
-        dados = ler_dados_ticket(canal)
-        if not dados["owner_id"]:
-            await interaction.response.send_message(
-                "Este canal não é um ticket válido.", ephemeral=True
-            )
-            return
-
-        if not eh_responsavel_ticket(guild, interaction.user):
-            await interaction.response.send_message(
-                "Apenas a equipe de atendimento pode assumir tickets.",
-                ephemeral=True
-            )
-            return
-
-        assumido_por = dados.get("assumido_por")
-        if assumido_por and assumido_por != interaction.user.id:
-            await interaction.response.send_message(
-                f"Este ticket já foi assumido por <@{assumido_por}>.",
-                ephemeral=True
-            )
-            return
-
-        if assumido_por == interaction.user.id:
-            await interaction.response.send_message(
-                "Você já está responsável por este ticket.", ephemeral=True
-            )
-            return
-
-        # Reconhece a interação imediatamente para evitar "bot não respondeu".
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        atualizado = await atualizar_dados_ticket(
-            canal,
-            assumido_por=interaction.user.id,
-            respondido=True,
-            ultima_atividade=int(time.time())
-        )
-        if not atualizado:
-            await interaction.followup.send(
-                "Não consegui salvar quem assumiu o ticket. Tente novamente.",
-                ephemeral=True
-            )
-            return
-
-        await canal.send(
-            f"🙋 {interaction.user.mention} assumiu este atendimento!",
-            allowed_mentions=discord.AllowedMentions(users=True)
-        )
-        await interaction.followup.send(
-            "Você assumiu este atendimento.", ephemeral=True
-        )
+        await processar_assumir(interaction)
 
     @discord.ui.button(
         label="Ver painel",
@@ -2998,7 +3201,11 @@ class TicketCloseView(discord.ui.View):
         await interaction.response.send_message(
             "⚙️ **Painel de gerenciamento do ticket**\n"
             "Escolha uma ação abaixo. Este painel é visível somente para você.",
-            view=TicketStaffPanelView(),
+            view=TicketStaffPanelView(
+                mostrar_assumir=(
+                    dados.get("assumido_por") != interaction.user.id
+                )
+            ),
             ephemeral=True
         )
 
@@ -3028,20 +3235,11 @@ class TicketCloseView(discord.ui.View):
             )
             return
 
-        # Agora pode fechar se for o autor do ticket
-        # OU se for um responsável/administrador.
-        eh_dono_ticket = (
-            interaction.user.id == dados["owner_id"]
-        )
-
-        eh_equipe = eh_responsavel_ticket(
-            guild,
-            interaction.user
-        )
-
-        if not eh_dono_ticket and not eh_equipe:
+        # Somente responsáveis/administradores podem fechar.
+        # Quem abriu o ticket NÃO consegue fechar.
+        if not eh_responsavel_ticket(guild, interaction.user):
             await interaction.response.send_message(
-                "Você não tem permissão para fechar este ticket.",
+                "Apenas a equipe (administradores) pode fechar este ticket.",
                 ephemeral=True
             )
             return
@@ -3236,10 +3434,15 @@ class TicketPanelView(discord.ui.View):
                 text=f"{guild.name} • Central de Atendimento"
             )
 
-            await ticket_canal.send(
+            msg_controle = await ticket_canal.send(
                 content=membro.mention,
                 embed=embed,
                 view=TicketCloseView()
+            )
+
+            await atualizar_dados_ticket(
+                ticket_canal,
+                msg_controle_id=msg_controle.id
             )
 
             await interaction.followup.send(
@@ -3331,6 +3534,341 @@ async def ticket_painel(ctx, canal: discord.TextChannel):
             "❌ Não foi possível publicar o painel.",
             delete_after=5
         )
+
+
+# =========================================================
+# COMANDO: !painel (SOMENTE DONO DO SERVIDOR)
+# =========================================================
+
+class _CtxPainel:
+    """
+    Contexto simplificado para o painel reaproveitar exatamente os
+    mesmos comandos que já existem (recursos, atualizar, limpar...),
+    sem duplicar código. As respostas são privadas (ephemeral).
+    """
+
+    def __init__(self, interaction):
+        self.interaction = interaction
+        self.guild = interaction.guild
+        self.author = interaction.user
+        self.channel = interaction.channel
+        self.invoked_with = "painel"
+        self.bot = bot
+
+    async def send(self, content=None, **kwargs):
+        kwargs.pop("delete_after", None)
+        kwargs["ephemeral"] = True
+
+        if not self.interaction.response.is_done():
+            await self.interaction.response.send_message(content, **kwargs)
+        else:
+            await self.interaction.followup.send(content, **kwargs)
+
+
+async def _rodar_comando_painel(interaction, comando, *args, **kwargs):
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        await comando.callback(_CtxPainel(interaction), *args, **kwargs)
+
+    except Exception as erro:
+        print(f"Erro executando função do painel: {erro}")
+
+        try:
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao executar essa função.",
+                ephemeral=True
+            )
+        except Exception:
+            pass
+
+
+def _data_arquivo(path):
+    try:
+        return f"<t:{int(os.path.getmtime(path))}:R>"
+    except Exception:
+        return "nunca"
+
+
+def embed_painel_dono(guild):
+    embed = discord.Embed(
+        title="👑 PAINEL DO DONO",
+        description=(
+            "Todas as funções do bot em um só lugar.\n"
+            "Somente você consegue usar os botões. "
+            "As respostas aparecem só para você.\n\n"
+            "📋 **Recursos** — lista de recursos do bot\n"
+            "🛡️ **Status** — estado da proteção e dos backups\n"
+            "🎫 **Tickets abertos** — quem abriu e quem assumiu\n"
+            "💾 **Atualizar backup** — salva canais e cargos agora\n"
+            "🎫 **Painel de tickets** — publica o painel em um canal\n"
+            "🧹 **Limpar mensagens** — apaga uma quantidade neste canal\n"
+            "💥 **Limpar canal todo** — recria este canal vazio"
+        ),
+        color=0x5865F2
+    )
+
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    embed.set_footer(text="Este painel se fecha sozinho em 5 minutos.")
+    return embed
+
+
+def embed_status_protecao(guild):
+    estado = get_raid(guild.id)
+    backup = carregar_backup(guild.id)
+
+    embed = discord.Embed(
+        title="🛡️ Status da proteção",
+        color=0xE74C3C if estado["ativo"] else 0x2ECC71,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.add_field(
+        name="Anti-Nuke",
+        value=(
+            "🚨 **RAID EM ANDAMENTO**"
+            if estado["ativo"] else "✅ Ativo e sem ameaças"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="Restaurando",
+        value="Sim" if estado["restaurando"] else "Não",
+        inline=True
+    )
+    embed.add_field(
+        name="Backup BOM",
+        value=(
+            f"{len(backup['canais'])} canais • "
+            f"{len(backup['cargos'])} cargos\n"
+            f"Atualizado: {_data_arquivo(backup_bom_path(guild.id))}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="Anti-Spam",
+        value="5 mensagens em 3s = timeout de 10 minutos",
+        inline=False
+    )
+    embed.add_field(
+        name="Tickets",
+        value=(
+            f"Alerta após {TEMPO_ALERTA_TICKET // 60} min sem resposta\n"
+            f"Fecha após {TEMPO_FECHAMENTO_INATIVIDADE_TICKET // 3600}h "
+            "de inatividade"
+        ),
+        inline=False
+    )
+
+    return embed
+
+
+def embed_tickets_abertos(guild):
+    linhas = []
+
+    for canal in guild.text_channels:
+        dados = ler_dados_ticket(canal)
+
+        if not dados["owner_id"]:
+            continue
+
+        responsavel = (
+            f"<@{dados['assumido_por']}>"
+            if dados.get("assumido_por") else "ninguém"
+        )
+
+        linhas.append(
+            f"{canal.mention} • autor <@{dados['owner_id']}> "
+            f"• assumido por {responsavel}"
+        )
+
+    embed = discord.Embed(
+        title=f"🎫 Tickets abertos ({len(linhas)})",
+        description=(
+            "\n".join(linhas[:25]) if linhas
+            else "Nenhum ticket aberto no momento."
+        ),
+        color=0x5865F2
+    )
+
+    if len(linhas) > 25:
+        embed.set_footer(text=f"E mais {len(linhas) - 25} tickets...")
+
+    return embed
+
+
+class LimparMensagensModal(discord.ui.Modal, title="🧹 Limpar mensagens"):
+    quantidade = discord.ui.TextInput(
+        label="Quantidade (1 a 1000)",
+        placeholder="100",
+        max_length=4
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _rodar_comando_painel(
+            interaction,
+            limpar,
+            argumento=str(self.quantidade.value).strip()
+        )
+
+
+class ConfirmarLimparCanalView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(
+        label="Sim, limpar tudo",
+        emoji="💥",
+        style=discord.ButtonStyle.danger
+    )
+    async def confirmar(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await _rodar_comando_painel(
+            interaction, limpar, argumento="canal todo"
+        )
+        self.stop()
+
+    @discord.ui.button(
+        label="Cancelar",
+        style=discord.ButtonStyle.secondary
+    )
+    async def cancelar(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.edit_message(
+            content="Cancelado.", view=None
+        )
+        self.stop()
+
+
+class EscolherCanalPainelTicket(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Escolha o canal do painel de tickets...",
+            channel_types=[discord.ChannelType.text],
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        canal = interaction.guild.get_channel(self.values[0].id)
+
+        if not isinstance(canal, discord.TextChannel):
+            await interaction.response.send_message(
+                "Canal inválido.", ephemeral=True
+            )
+            return
+
+        await _rodar_comando_painel(interaction, ticket_painel, canal)
+
+
+class PainelDonoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or interaction.user.id != interaction.guild.owner_id
+        ):
+            await interaction.response.send_message(
+                "Apenas o dono do servidor pode usar este painel.",
+                ephemeral=True
+            )
+            return False
+
+        return True
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Recursos", emoji="📋", row=0,
+                       style=discord.ButtonStyle.primary)
+    async def b_recursos(self, interaction: discord.Interaction,
+                         button: discord.ui.Button):
+        await _rodar_comando_painel(interaction, recursos)
+
+    @discord.ui.button(label="Status", emoji="🛡️", row=0,
+                       style=discord.ButtonStyle.primary)
+    async def b_status(self, interaction: discord.Interaction,
+                       button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=embed_status_protecao(interaction.guild), ephemeral=True
+        )
+
+    @discord.ui.button(label="Tickets abertos", emoji="🎫", row=0,
+                       style=discord.ButtonStyle.primary)
+    async def b_tickets(self, interaction: discord.Interaction,
+                        button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=embed_tickets_abertos(interaction.guild), ephemeral=True
+        )
+
+    @discord.ui.button(label="Atualizar backup", emoji="💾", row=1,
+                       style=discord.ButtonStyle.success)
+    async def b_backup(self, interaction: discord.Interaction,
+                       button: discord.ui.Button):
+        await _rodar_comando_painel(interaction, atualizar_backup, arg="")
+
+    @discord.ui.button(label="Painel de tickets", emoji="📨", row=1,
+                       style=discord.ButtonStyle.success)
+    async def b_painel_ticket(self, interaction: discord.Interaction,
+                              button: discord.ui.Button):
+        view = discord.ui.View(timeout=120)
+        view.add_item(EscolherCanalPainelTicket())
+        await interaction.response.send_message(
+            "Em qual canal publicar o painel de tickets?",
+            view=view, ephemeral=True
+        )
+
+    @discord.ui.button(label="Limpar mensagens", emoji="🧹", row=2,
+                       style=discord.ButtonStyle.secondary)
+    async def b_limpar(self, interaction: discord.Interaction,
+                       button: discord.ui.Button):
+        await interaction.response.send_modal(LimparMensagensModal())
+
+    @discord.ui.button(label="Limpar canal todo", emoji="💥", row=2,
+                       style=discord.ButtonStyle.danger)
+    async def b_limpar_canal(self, interaction: discord.Interaction,
+                             button: discord.ui.Button):
+        await interaction.response.send_message(
+            "⚠️ Isso recria **este canal** vazio (mantendo configurações "
+            "e permissões). Confirmar?",
+            view=ConfirmarLimparCanalView(), ephemeral=True
+        )
+
+    @discord.ui.button(label="Fechar painel", emoji="❌", row=3,
+                       style=discord.ButtonStyle.secondary)
+    async def b_fechar(self, interaction: discord.Interaction,
+                       button: discord.ui.Button):
+        await interaction.response.defer()
+        self.stop()
+
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
+
+@bot.command(name="painel")
+async def painel(ctx):
+    if ctx.author.id != ctx.guild.owner_id:
+        return
+
+    view = PainelDonoView()
+    view.message = await ctx.send(
+        embed=embed_painel_dono(ctx.guild),
+        view=view
+    )
 
 
 # =========================================================
