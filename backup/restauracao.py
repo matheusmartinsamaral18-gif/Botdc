@@ -387,24 +387,30 @@ async def restaurar_mensagens_canal(canal, backup_channel_id=None):
         if not conteudo.strip() and not embeds:
             conteudo = "[Mensagem sem texto ou conteúdo incorporado]"
 
+        # Só envia embeds/files quando existirem (None quebra o discord.py).
+        extras = {}
+        if embeds:
+            extras["embeds"] = embeds
+        if arquivos_discord:
+            extras["files"] = arquivos_discord
+
         try:
             if webhook:
+                if conteudo:
+                    extras["content"] = conteudo[:2000]
                 await webhook.send(
-                    content=conteudo[:2000] if conteudo else None,
                     username=str(autor)[:80],
                     avatar_url=avatar,
-                    embeds=embeds if embeds else None,
-                    files=arquivos_discord if arquivos_discord else None,
                     allowed_mentions=discord.AllowedMentions.none(),
-                    wait=True
+                    wait=True,
+                    **extras
                 )
             else:
                 await canal.send(
                     f"**{discord.utils.escape_markdown(str(autor)[:80])}:** "
                     f"{conteudo[:1700]}",
-                    embeds=embeds if embeds else None,
-                    files=arquivos_discord if arquivos_discord else None,
-                    allowed_mentions=discord.AllowedMentions.none()
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    **extras
                 )
             restauradas += 1
             await asyncio.sleep(0.25)
