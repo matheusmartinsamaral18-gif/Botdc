@@ -5,7 +5,7 @@ import inspect
 
 import discord
 
-from config import bot
+from config import bot, MSG_POR_CANAL
 from core.raid_estado import get_raid
 from backup.armazenamento import carregar_backup
 from backup.mapa_canais import (
@@ -13,7 +13,6 @@ from backup.mapa_canais import (
     resolver_canal_configurado,
     obter_id_backup_canal,
 )
-from backup.mensagens import obter_mensagens_backup
 
 
 # ---------- permissões dos canais no backup ----------
@@ -296,9 +295,48 @@ async def _obter_webhook_restauracao(canal):
         return None
 
 
+def buscar_mensagens_salvas(canal, backup_channel_id=None):
+    """
+    Procura as mensagens salvas do canal de várias formas, porque o ID do
+    canal muda quando ele é recriado (!limpar canal todo, restauração...):
+    1) ID informado, 2) ID atual, 3) ID antigo do mapa, 4) mesmo nome.
+    Entradas vazias são ignoradas.
+    """
+    guild_id = canal.guild.id
+    historico = carregar_backup(guild_id).get("mensagens", {})
+
+    candidatos = []
+    if backup_channel_id:
+        candidatos.append(str(backup_channel_id))
+    candidatos.append(str(canal.id))
+    id_mapa = obter_id_backup_canal(guild_id, canal)
+    if id_mapa:
+        candidatos.append(str(id_mapa))
+
+    for chave in candidatos:
+        item = historico.get(chave)
+        if isinstance(item, dict) and item.get("messages"):
+            return item["messages"][-MSG_POR_CANAL:]
+
+    # Último recurso: outro registro com o mesmo nome de canal.
+    por_nome = [
+        item for item in historico.values()
+        if isinstance(item, dict)
+        and item.get("channel_name") == canal.name
+        and item.get("messages")
+    ]
+    if por_nome:
+        melhor = max(
+            por_nome,
+            key=lambda i: i["messages"][-1].get("created_at", "")
+        )
+        return melhor["messages"][-MSG_POR_CANAL:]
+
+    return []
+
+
 async def restaurar_mensagens_canal(canal, backup_channel_id=None):
-    id_backup = backup_channel_id or obter_id_backup_canal(canal.guild.id, canal)
-    mensagens = obter_mensagens_backup(canal.guild.id, id_backup)
+    mensagens = buscar_mensagens_salvas(canal, backup_channel_id)
     if not mensagens:
         return 0, "Não há mensagens salvas para este canal."
 
