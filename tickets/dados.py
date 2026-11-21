@@ -128,7 +128,11 @@ CAMPOS_ESTADO_TICKET = (
     "assumido_por",
     "ultima_atividade",
     "ultimo_alerta_msg",
-    "msg_controle_id"
+    "msg_controle_id",
+    # Controles exclusivos do prazo para o autor enviar a primeira mensagem.
+    "autor_falou",
+    "aviso_abertura_enviado",
+    "punicao_abertura_processada"
 )
 estado_tickets = {}
 
