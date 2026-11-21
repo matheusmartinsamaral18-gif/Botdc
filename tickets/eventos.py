@@ -1,4 +1,4 @@
-"""Eventos de mensagem dentro dos tickets: atividade, responsável e comando .f"""
+"""Eventos de mensagem dentro dos tickets: atividade, responsável e comando .f."""
 import time
 import asyncio
 
@@ -30,6 +30,14 @@ async def ticket_on_message(message):
         message.channel,
         ultima_atividade=int(time.time())
     )
+
+    # ----- registra a primeira mensagem de quem abriu o ticket -----
+    # Mensagens da equipe e de outros membros não contam como resposta do autor.
+    if message.author.id == dados_ticket["owner_id"]:
+        await atualizar_dados_ticket(
+            message.channel,
+            autor_falou=True
+        )
 
     # ----- identifica resposta de responsável -----
     dados_ticket = ler_dados_ticket(message.channel)
