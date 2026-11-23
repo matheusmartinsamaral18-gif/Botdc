@@ -1,11 +1,12 @@
 """
 SISTEMA DE CALLS TEMPORÁRIAS
 - !painelcall #canal  -> envia o painel "Abrir call" no canal escolhido
-- Tudo por botões (nada para digitar)
+- Tudo por botões (o nome da call é opcional)
 - A call é criada na MESMA categoria do canal do painel
+- Nome: a pessoa escolhe; se não escolher, fica "Call de <nome dela>"
 - Dono da call tem prioridade (entra mesmo com a call cheia)
-- Call cheia: quem entrar de fora (inclusive ADM) é desconectado
-- 3 tentativas forçadas -> castigo (timeout) de 30 minutos
+- Call cheia/privada: quem entrar de fora (inclusive ADM) é desconectado
+- 2 tentativas de invadir -> mute (castigo) de 30 minutos
 - Call vazia por 1 minuto -> é apagada
 """
 import json
@@ -21,8 +22,8 @@ from config import MEU_ID, LOGS_CHANNEL_ID
 # ---------- Ajustes ----------
 CATEGORIA_CALLS_ID = None      # None = usa a categoria do canal do painel
 LIMITES = [2, 3, 4, 5, 6, 7, 8, 10, 15, 20]   # botões de limite de pessoas
-MAX_INFRACOES = 3              # tentativas antes do castigo
-CASTIGO_MINUTOS = 30           # tempo do castigo
+MAX_INFRACOES = 2              # tentativas de invadir antes do mute
+CASTIGO_MINUTOS = 30           # tempo do mute
 TEMPO_VAZIA_SEG = 60           # call vazia por esse tempo é apagada
 
 COR_PRINCIPAL = 0x57F287
@@ -51,15 +52,37 @@ class PainelView(discord.ui.View):
                 f"Você já tem uma call aberta: {existente.mention}", ephemeral=True
             )
 
-        view = CriarCallView(self.cog)
+        view = CriarCallView(self.cog, interaction.user.display_name)
         await interaction.response.send_message(
             embed=view.embed(), view=view, ephemeral=True
         )
 
 
 # =====================================================
-# CRIAÇÃO DA CALL (100% botões)
+# CRIAÇÃO DA CALL
 # =====================================================
+class NomeModal(discord.ui.Modal, title="Nome da call"):
+    nome = discord.ui.TextInput(
+        label="Nome da call (opcional)",
+        placeholder="Deixe vazio para usar o nome padrão",
+        required=False,
+        max_length=50,
+    )
+
+    def __init__(self, view):
+        super().__init__()
+        self.view_ref = view
+        if view.nome:
+            self.nome.default = view.nome
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.view_ref.nome = self.nome.value.strip() or None
+        self.view_ref.atualizar()
+        await interaction.response.edit_message(
+            embed=self.view_ref.embed(), view=self.view_ref
+        )
+
+
 class BotaoTipo(discord.ui.Button):
     def __init__(self, privada: bool):
         super().__init__(
@@ -75,6 +98,19 @@ class BotaoTipo(discord.ui.Button):
         view.privada = self.privada
         view.atualizar()
         await interaction.response.edit_message(embed=view.embed(), view=view)
+
+
+class BotaoNome(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Nome",
+            emoji="✏️",
+            style=discord.ButtonStyle.secondary,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(NomeModal(self.view))
 
 
 class BotaoLimite(discord.ui.Button):
@@ -108,7 +144,7 @@ class BotaoCriar(discord.ui.Button):
         await interaction.response.defer()
 
         canal, ja_existia = await view.cog.criar_call(
-            interaction, view.privada, view.limite
+            interaction, view.privada, view.limite, view.nome
         )
 
         if canal is None:
@@ -167,17 +203,21 @@ class BotaoCancelar(discord.ui.Button):
 
 
 class CriarCallView(discord.ui.View):
-    def __init__(self, cog):
+    def __init__(self, cog, dono_nome: str):
         super().__init__(timeout=180)
         self.cog = cog
+        self.dono_nome = dono_nome
         self.privada = False
         self.limite = 2
+        self.nome = None  # None = nome padrão "Call de <nome>"
 
         self.botoes_tipo = [BotaoTipo(False), BotaoTipo(True)]
+        self.botao_nome = BotaoNome()
         self.botoes_limite = []
 
         for b in self.botoes_tipo:
             self.add_item(b)
+        self.add_item(self.botao_nome)
 
         # 5 botões por linha: linhas 1 e 2
         for i, n in enumerate(LIMITES):
@@ -203,12 +243,16 @@ class CriarCallView(discord.ui.View):
                 if b.limite == self.limite
                 else discord.ButtonStyle.secondary
             )
+        self.botao_nome.style = (
+            discord.ButtonStyle.primary if self.nome else discord.ButtonStyle.secondary
+        )
 
     def embed(self):
         e = discord.Embed(
             title="📞 Configure sua call",
             description=(
                 "Escolha o **tipo** e o **limite de pessoas** clicando nos botões.\n"
+                "Se quiser, toque em **✏️ Nome** para dar um nome à call.\n"
                 "Depois toque em **Criar call**."
             ),
             color=COR_PRINCIPAL,
@@ -219,6 +263,11 @@ class CriarCallView(discord.ui.View):
             inline=True,
         )
         e.add_field(name="Limite", value=f"👥 {self.limite} pessoas", inline=True)
+        e.add_field(
+            name="Nome",
+            value=f"📞 {self.nome}" if self.nome else f"📞 Call de {self.dono_nome}",
+            inline=False,
+        )
         return e
 
 
@@ -329,13 +378,13 @@ class CallCog(commands.Cog):
         embed = discord.Embed(
             title="🎙️  CENTRAL DE CALLS",
             description=(
-                "Crie a sua própria sala de voz **temporária** em segundos!\n"
-                "Tudo por botões, sem digitar nada.\n\n"
+                "Crie a sua própria sala de voz **temporária** em segundos!\n\n"
                 "**Como funciona**\n"
                 "1️⃣ Clique em **📞 Abrir call**\n"
                 "2️⃣ Escolha **pública** ou **privada**\n"
                 "3️⃣ Escolha o **limite de pessoas**\n"
-                "4️⃣ Pronto! Sua call é criada na hora"
+                "4️⃣ Se quiser, dê um **nome** para a call\n"
+                "5️⃣ Pronto! Sua call é criada na hora"
             ),
             color=COR_PRINCIPAL,
         )
@@ -358,6 +407,11 @@ class CallCog(commands.Cog):
             value="Call vazia por 1 minuto é apagada automaticamente",
             inline=False,
         )
+        embed.add_field(
+            name="🚨 Segurança",
+            value="**Tentou invadir call, toma mute automaticamente!**",
+            inline=False,
+        )
         if ctx.guild.icon:
             embed.set_thumbnail(url=ctx.guild.icon.url)
         embed.set_footer(text="Clique no botão abaixo para começar ⬇️")
@@ -366,7 +420,7 @@ class CallCog(commands.Cog):
         await ctx.send(f"✅ Painel enviado em {canal.mention}")
 
     # ---------- criação da call ----------
-    async def criar_call(self, interaction, privada, limite):
+    async def criar_call(self, interaction, privada, limite, nome=None):
         """Retorna (canal, ja_existia)."""
         guild = interaction.guild
         dono = interaction.user
@@ -393,9 +447,15 @@ class CallCog(commands.Cog):
         if privada:
             overwrites[guild.default_role] = discord.PermissionOverwrite(connect=False)
 
+        # Nome escolhido pela pessoa ou padrão "Call de <nome>"
+        if nome:
+            nome_canal = f"📞 {nome}"
+        else:
+            nome_canal = f"📞 Call de {dono.display_name}"
+
         try:
             canal = await guild.create_voice_channel(
-                name=f"📞 Call de {dono.display_name}"[:100],
+                name=nome_canal[:100],
                 category=categoria,
                 user_limit=limite,
                 overwrites=overwrites,
@@ -475,7 +535,7 @@ class CallCog(commands.Cog):
 
         motivo = "call privada" if not autorizado else "call cheia"
         try:
-            await member.move_to(None, reason=f"Entrou em {motivo}")
+            await member.move_to(None, reason=f"Tentou invadir ({motivo})")
         except (discord.Forbidden, discord.HTTPException):
             await self._log(f"⚠️ Não consegui remover {member.mention} de {canal.mention}.")
             return
@@ -489,16 +549,16 @@ class CallCog(commands.Cog):
             try:
                 await member.timeout(
                     timedelta(minutes=CASTIGO_MINUTOS),
-                    reason=f"Forçou entrada em call ({motivo}) {MAX_INFRACOES}x",
+                    reason=f"Tentou invadir call ({motivo}) {MAX_INFRACOES}x",
                 )
                 await self._log(
-                    f"🔇 {member.mention} ficou {CASTIGO_MINUTOS} min de castigo "
-                    f"por forçar entrada em {canal.mention}."
+                    f"🔇 {member.mention} tomou mute de {CASTIGO_MINUTOS} min "
+                    f"por tentar invadir {canal.mention}."
                 )
             except (discord.Forbidden, discord.HTTPException):
                 await self._log(
-                    f"⚠️ {member.mention} forçou {MAX_INFRACOES}x a entrada em "
-                    f"{canal.mention}, mas não consegui aplicar o castigo "
+                    f"⚠️ {member.mention} tentou invadir {canal.mention} "
+                    f"{MAX_INFRACOES}x, mas não consegui aplicar o mute "
                     f"(cargo acima do bot ou permissão de Administrador)."
                 )
         self.salvar()
