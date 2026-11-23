@@ -34,6 +34,9 @@ EXTENSOES = [
     "geral.recursos",
     "geral.limpar",
 
+    # Calls
+    "calls.sistema",
+
     # Painel do dono (depende dos outros)
     "painel.painel_dono",
 ]
