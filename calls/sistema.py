@@ -8,7 +8,7 @@ SISTEMA DE CALLS TEMPORÁRIAS
 - Call cheia/privada: quem entrar de fora (inclusive ADM) é desconectado
 - 2 tentativas de invadir -> bot TIRA TODOS OS CARGOS + mute de 30 minutos
 - Quando o mute acaba, o bot DEVOLVE todos os cargos
-- Call vazia por 1 minuto -> é apagada
+- Call vazia por 30 segundos -> é apagada
 """
 import json
 import os
@@ -25,7 +25,7 @@ CATEGORIA_CALLS_ID = None      # None = usa a categoria do canal do painel
 LIMITES = [2, 3, 4, 5, 6, 7, 8, 10, 15, 20]   # botões de limite de pessoas
 MAX_INFRACOES = 2              # tentativas de invadir antes da punição
 CASTIGO_MINUTOS = 30           # tempo do mute
-TEMPO_VAZIA_SEG = 60           # call vazia por esse tempo é apagada
+TEMPO_VAZIA_SEG = 30           # call vazia por esse tempo é apagada
 
 COR_PRINCIPAL = 0x57F287
 COR_ALERTA = 0xED4245
@@ -399,51 +399,39 @@ class CallCog(commands.Cog):
             return await ctx.send("Use: `!painelcall #canal`")
 
         embed = discord.Embed(
-            title="✨ 🎙️  CENTRAL DE CALLS  🎙️ ✨",
+            title="🎙️  CENTRAL DE CALLS",
             description=(
-                "Crie a sua **própria sala de voz temporária** em segundos! 🚀\n"
-                "Tudo por botões, rápido e fácil.\n\n"
-                f"{LINHA}\n"
-                "**📋  COMO FUNCIONA**\n"
-                "> 1️⃣  Clique em **📞 Abrir call**\n"
-                "> 2️⃣  Escolha **🔓 pública** ou **🔒 privada**\n"
-                "> 3️⃣  Escolha o **👥 limite de pessoas**\n"
-                "> 4️⃣  Se quiser, dê um **✏️ nome** para a call\n"
-                "> 5️⃣  Pronto! Sua call nasce na hora ✨\n"
-                f"{LINHA}"
+                "Crie a sua **sala de voz temporária** na hora, "
+                "tudo por botões. ✨\n\n"
+                "**📋  Como funciona**\n"
+                "```\n"
+                "📞 Abrir call  ➜  escolha:\n"
+                "🔓 Pública  · todos entram\n"
+                "🔒 Privada  · só convidados\n"
+                "👥 Limite   · de 2 a 20 pessoas\n"
+                "✏️ Nome     · opcional\n"
+                "```"
             ),
             color=COR_PRINCIPAL,
         )
         embed.add_field(
-            name="🔓  Pública",
-            value="Qualquer pessoa pode entrar",
-            inline=True,
-        )
-        embed.add_field(
-            name="🔒  Privada",
-            value="Só entra **quem você convidar**",
-            inline=True,
-        )
-        embed.add_field(
-            name="👥  Limite",
-            value="De **2 até 20** pessoas",
-            inline=True,
-        )
-        embed.add_field(
             name="👑  Prioridade",
             value="Você **sempre entra** na sua call, mesmo cheia",
-            inline=False,
+            inline=True,
         )
         embed.add_field(
             name="⏱️  Auto-fechamento",
-            value="Call vazia por **1 minuto** é apagada sozinha",
-            inline=False,
+            value=f"Call vazia por **{TEMPO_VAZIA_SEG}s** é apagada sozinha",
+            inline=True,
         )
         embed.add_field(
-            name="🚨  ZONA DE SEGURANÇA",
+            name="🚨  Zona de segurança",
             value=(
-                "**Tentou invadir call? Toma punição automática!**\n"
-                f"> ⚠️ Na **{MAX_INFRACOES}ª tentativa**:\n"
+                "```diff\n"
+                "- Tentou invadir call?\n"
+                "- Toma punição automática!\n"
+                "```"
+                f"⚠️ Na **{MAX_INFRACOES}ª tentativa**:\n"
                 f"> 🔇 Mute de **{CASTIGO_MINUTOS} minutos**\n"
                 "> 🎭 **Todos os cargos removidos** (até ADM)\n"
                 "> ✅ Cargos devolvidos quando o mute acabar"
@@ -533,7 +521,7 @@ class CallCog(commands.Cog):
             if member.id in dados["ordem"]:
                 dados["ordem"].remove(member.id)
             if not before.channel.members:
-                dados["vazia_desde"] = time.time()  # começa a contar 1 minuto
+                dados["vazia_desde"] = time.time()  # começa a contar
             self.salvar()
 
         # Entrou numa call
@@ -738,8 +726,8 @@ class CallCog(commands.Cog):
             self.calls.pop(canal.id, None)
             self.salvar()
 
-    # ---------- fecha calls vazias há 1 minuto ----------
-    @tasks.loop(seconds=10)
+    # ---------- fecha calls vazias após TEMPO_VAZIA_SEG ----------
+    @tasks.loop(seconds=5)
     async def limpeza(self):
         agora = time.time()
         for cid, d in list(self.calls.items()):
