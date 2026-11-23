@@ -6,7 +6,8 @@ SISTEMA DE CALLS TEMPORÁRIAS
 - Nome: a pessoa escolhe; se não escolher, fica "Call de <nome dela>"
 - Dono da call tem prioridade (entra mesmo com a call cheia)
 - Call cheia/privada: quem entrar de fora (inclusive ADM) é desconectado
-- 2 tentativas de invadir -> mute (castigo) de 30 minutos
+- 2 tentativas de invadir -> bot TIRA TODOS OS CARGOS + mute de 30 minutos
+- Quando o mute acaba, o bot DEVOLVE todos os cargos
 - Call vazia por 1 minuto -> é apagada
 """
 import json
@@ -22,11 +23,13 @@ from config import MEU_ID, LOGS_CHANNEL_ID
 # ---------- Ajustes ----------
 CATEGORIA_CALLS_ID = None      # None = usa a categoria do canal do painel
 LIMITES = [2, 3, 4, 5, 6, 7, 8, 10, 15, 20]   # botões de limite de pessoas
-MAX_INFRACOES = 2              # tentativas de invadir antes do mute
+MAX_INFRACOES = 2              # tentativas de invadir antes da punição
 CASTIGO_MINUTOS = 30           # tempo do mute
 TEMPO_VAZIA_SEG = 60           # call vazia por esse tempo é apagada
 
 COR_PRINCIPAL = 0x57F287
+COR_ALERTA = 0xED4245
+LINHA = "━━━━━━━━━━━━━━━━━━━━━━"
 ARQUIVO = os.path.join(os.path.dirname(__file__), "dados_calls.json")
 
 
@@ -162,23 +165,25 @@ class BotaoCriar(discord.ui.Button):
             )
 
         embed = discord.Embed(
-            title="✅ Call criada!",
-            description=f"{canal.mention}",
+            title="✅ Call criada com sucesso!",
+            description=f"🎙️ {canal.mention}\n{LINHA}",
             color=COR_PRINCIPAL,
         )
-        embed.add_field(name="Tipo", value="🔒 Privada" if view.privada else "🔓 Pública")
+        embed.add_field(
+            name="Tipo", value="🔒 Privada" if view.privada else "🔓 Pública"
+        )
         embed.add_field(name="Limite", value=f"👥 {view.limite} pessoas")
         if interaction.user.voice:
-            embed.set_footer(text="Te movi para a call.")
+            embed.set_footer(text="✨ Te movi para a call.")
         else:
             embed.set_footer(
-                text=f"Entre nela em até {TEMPO_VAZIA_SEG}s ou ela será apagada."
+                text=f"⏳ Entre nela em até {TEMPO_VAZIA_SEG}s ou ela será apagada."
             )
 
         nova_view = None
         if view.privada:
             embed.add_field(
-                name="Convidar",
+                name="👤 Convidar",
                 value="Use o menu abaixo para escolher quem pode entrar.",
                 inline=False,
             )
@@ -251,9 +256,10 @@ class CriarCallView(discord.ui.View):
         e = discord.Embed(
             title="📞 Configure sua call",
             description=(
-                "Escolha o **tipo** e o **limite de pessoas** clicando nos botões.\n"
-                "Se quiser, toque em **✏️ Nome** para dar um nome à call.\n"
-                "Depois toque em **Criar call**."
+                "Escolha o **tipo** e o **limite de pessoas** nos botões.\n"
+                "Se quiser, toque em **✏️ Nome** para nomear a call.\n"
+                "Depois toque em **✅ Criar call**.\n"
+                f"{LINHA}"
             ),
             color=COR_PRINCIPAL,
         )
@@ -324,38 +330,55 @@ class ConvidarView(discord.ui.View):
 class CallCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.calls = {}  # canal_id -> dados
+        self.calls = {}     # canal_id -> dados da call
+        self.castigos = {}  # user_id (str) -> {guild, cargos, fim}
 
     # ---------- ciclo de vida ----------
     async def cog_load(self):
         self.carregar()
         self.bot.add_view(PainelView(self))
         self.limpeza.start()
+        self.restaurar.start()
 
     async def cog_unload(self):
         self.limpeza.cancel()
+        self.restaurar.cancel()
 
     # ---------- persistência ----------
     def carregar(self):
         try:
             with open(ARQUIVO, "r", encoding="utf-8") as f:
                 bruto = json.load(f)
-            self.calls = {int(k): v for k, v in bruto.items()}
         except (FileNotFoundError, json.JSONDecodeError):
-            self.calls = {}
+            self.calls, self.castigos = {}, {}
+            return
+
+        if isinstance(bruto, dict) and "calls" in bruto:
+            calls = bruto.get("calls", {})
+            self.castigos = bruto.get("castigos", {})
+        else:  # formato antigo (só calls)
+            calls = bruto
+            self.castigos = {}
+        self.calls = {int(k): v for k, v in calls.items()}
 
     def salvar(self):
         try:
             with open(ARQUIVO, "w", encoding="utf-8") as f:
-                json.dump({str(k): v for k, v in self.calls.items()}, f)
+                json.dump(
+                    {
+                        "calls": {str(k): v for k, v in self.calls.items()},
+                        "castigos": self.castigos,
+                    },
+                    f,
+                )
         except OSError as erro:
             print(f"❌ Erro salvando calls: {erro}")
 
-    async def _log(self, texto):
+    async def _log(self, texto=None, embed=None):
         canal = self.bot.get_channel(LOGS_CHANNEL_ID)
         if canal:
             try:
-                await canal.send(texto)
+                await canal.send(content=texto, embed=embed)
             except discord.HTTPException:
                 pass
 
@@ -376,45 +399,60 @@ class CallCog(commands.Cog):
             return await ctx.send("Use: `!painelcall #canal`")
 
         embed = discord.Embed(
-            title="🎙️  CENTRAL DE CALLS",
+            title="✨ 🎙️  CENTRAL DE CALLS  🎙️ ✨",
             description=(
-                "Crie a sua própria sala de voz **temporária** em segundos!\n\n"
-                "**Como funciona**\n"
-                "1️⃣ Clique em **📞 Abrir call**\n"
-                "2️⃣ Escolha **pública** ou **privada**\n"
-                "3️⃣ Escolha o **limite de pessoas**\n"
-                "4️⃣ Se quiser, dê um **nome** para a call\n"
-                "5️⃣ Pronto! Sua call é criada na hora"
+                "Crie a sua **própria sala de voz temporária** em segundos! 🚀\n"
+                "Tudo por botões, rápido e fácil.\n\n"
+                f"{LINHA}\n"
+                "**📋  COMO FUNCIONA**\n"
+                "> 1️⃣  Clique em **📞 Abrir call**\n"
+                "> 2️⃣  Escolha **🔓 pública** ou **🔒 privada**\n"
+                "> 3️⃣  Escolha o **👥 limite de pessoas**\n"
+                "> 4️⃣  Se quiser, dê um **✏️ nome** para a call\n"
+                "> 5️⃣  Pronto! Sua call nasce na hora ✨\n"
+                f"{LINHA}"
             ),
             color=COR_PRINCIPAL,
         )
         embed.add_field(
-            name="🔓 Pública", value="Qualquer pessoa pode entrar", inline=True
+            name="🔓  Pública",
+            value="Qualquer pessoa pode entrar",
+            inline=True,
         )
         embed.add_field(
-            name="🔒 Privada", value="Só quem você convidar", inline=True
+            name="🔒  Privada",
+            value="Só entra **quem você convidar**",
+            inline=True,
         )
         embed.add_field(
-            name="👥 Limite", value="De 2 até 20 pessoas", inline=True
+            name="👥  Limite",
+            value="De **2 até 20** pessoas",
+            inline=True,
         )
         embed.add_field(
-            name="👑 Prioridade",
-            value="Você sempre entra na sua call, mesmo cheia",
+            name="👑  Prioridade",
+            value="Você **sempre entra** na sua call, mesmo cheia",
             inline=False,
         )
         embed.add_field(
-            name="⏱️ Auto-fechamento",
-            value="Call vazia por 1 minuto é apagada automaticamente",
+            name="⏱️  Auto-fechamento",
+            value="Call vazia por **1 minuto** é apagada sozinha",
             inline=False,
         )
         embed.add_field(
-            name="🚨 Segurança",
-            value="**Tentou invadir call, toma mute automaticamente!**",
+            name="🚨  ZONA DE SEGURANÇA",
+            value=(
+                "**Tentou invadir call? Toma punição automática!**\n"
+                f"> ⚠️ Na **{MAX_INFRACOES}ª tentativa**:\n"
+                f"> 🔇 Mute de **{CASTIGO_MINUTOS} minutos**\n"
+                "> 🎭 **Todos os cargos removidos** (até ADM)\n"
+                "> ✅ Cargos devolvidos quando o mute acabar"
+            ),
             inline=False,
         )
         if ctx.guild.icon:
             embed.set_thumbnail(url=ctx.guild.icon.url)
-        embed.set_footer(text="Clique no botão abaixo para começar ⬇️")
+        embed.set_footer(text="📞 Clique no botão abaixo para começar ⬇️")
 
         await canal.send(embed=embed, view=PainelView(self))
         await ctx.send(f"✅ Painel enviado em {canal.mention}")
@@ -546,23 +584,146 @@ class CallCog(commands.Cog):
 
         if n >= MAX_INFRACOES:
             dados["infracoes"][chave] = 0
-            try:
-                await member.timeout(
-                    timedelta(minutes=CASTIGO_MINUTOS),
-                    reason=f"Tentou invadir call ({motivo}) {MAX_INFRACOES}x",
-                )
-                await self._log(
-                    f"🔇 {member.mention} tomou mute de {CASTIGO_MINUTOS} min "
-                    f"por tentar invadir {canal.mention}."
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                await self._log(
-                    f"⚠️ {member.mention} tentou invadir {canal.mention} "
-                    f"{MAX_INFRACOES}x, mas não consegui aplicar o mute "
-                    f"(cargo acima do bot ou permissão de Administrador)."
-                )
+            self.salvar()
+            await self._punir(member, canal, motivo)
+            return
+
         self.salvar()
 
+    # ---------- punição: tira cargos + mute ----------
+    async def _punir(self, member, canal, motivo):
+        guild = member.guild
+        chave = str(member.id)
+
+        # Já está punido (cargos já guardados): não faz de novo
+        if chave in self.castigos:
+            return
+
+        # O dono do servidor é intocável para o Discord
+        if member.id == guild.owner_id:
+            return await self._log(
+                f"⚠️ {member.mention} (dono do servidor) tentou invadir "
+                f"{canal.mention}, mas o Discord não permite puni-lo."
+            )
+
+        # Cargos que o bot consegue tirar (ignora @everyone, de bot/booster e acima do bot)
+        removiveis = [
+            r for r in member.roles
+            if not r.is_default() and not r.managed and r < guild.me.top_role
+        ]
+        fim = time.time() + CASTIGO_MINUTOS * 60
+
+        # Salva ANTES de remover (se o bot cair no meio, ainda devolve depois)
+        self.castigos[chave] = {
+            "guild": guild.id,
+            "cargos": [r.id for r in removiveis],
+            "fim": fim,
+        }
+        self.salvar()
+
+        if removiveis:
+            try:
+                await member.remove_roles(
+                    *removiveis, reason=f"Tentou invadir call ({motivo}) {MAX_INFRACOES}x"
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass  # tenta o mute mesmo assim
+
+        # Mute (castigo)
+        try:
+            await member.timeout(
+                timedelta(minutes=CASTIGO_MINUTOS),
+                reason=f"Tentou invadir call ({motivo}) {MAX_INFRACOES}x",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            # Não deu pra mutar: devolve os cargos na hora e avisa
+            await self._devolver(chave, silencioso=True)
+            return await self._log(
+                f"⚠️ {member.mention} tentou invadir {canal.mention} "
+                f"{MAX_INFRACOES}x, mas não consegui aplicar o mute. "
+                f"Cargos devolvidos."
+            )
+
+        nomes = ", ".join(r.mention for r in removiveis) or "nenhum"
+        if len(nomes) > 1000:
+            nomes = nomes[:1000] + "…"
+
+        embed = discord.Embed(
+            title="🚨 Tentativa de invasão de call",
+            description=f"{member.mention} foi **punido automaticamente**.",
+            color=COR_ALERTA,
+        )
+        embed.add_field(name="🎙️ Call", value=canal.mention, inline=True)
+        embed.add_field(name="📌 Motivo", value=motivo.capitalize(), inline=True)
+        embed.add_field(
+            name="🔇 Mute",
+            value=f"{CASTIGO_MINUTOS} min (termina <t:{int(fim)}:R>)",
+            inline=False,
+        )
+        embed.add_field(
+            name=f"🎭 Cargos removidos ({len(removiveis)})", value=nomes, inline=False
+        )
+        embed.set_footer(text="Os cargos voltam sozinhos quando o mute acabar.")
+        await self._log(embed=embed)
+
+    async def _devolver(self, chave, silencioso=False):
+        """Devolve os cargos guardados e apaga o castigo."""
+        info = self.castigos.get(chave)
+        if not info:
+            return
+
+        guild = self.bot.get_guild(info["guild"])
+        if guild is None:  # bot saiu do servidor
+            self.castigos.pop(chave, None)
+            self.salvar()
+            return
+
+        uid = int(chave)
+        membro = guild.get_member(uid)
+        if membro is None:
+            try:
+                membro = await guild.fetch_member(uid)
+            except discord.NotFound:  # a pessoa saiu do servidor
+                self.castigos.pop(chave, None)
+                self.salvar()
+                return
+            except discord.HTTPException:
+                return  # tenta de novo no próximo ciclo
+
+        cargos = []
+        for rid in info["cargos"]:
+            r = guild.get_role(rid)
+            if r and not r.managed and r < guild.me.top_role:
+                cargos.append(r)
+
+        try:
+            if cargos:
+                await membro.add_roles(*cargos, reason="Fim do castigo de call")
+        except discord.Forbidden:
+            self.castigos.pop(chave, None)
+            self.salvar()
+            return await self._log(
+                f"⚠️ Não consegui devolver os cargos de {membro.mention}. "
+                f"Devolva manualmente."
+            )
+        except discord.HTTPException:
+            return  # tenta de novo no próximo ciclo
+
+        self.castigos.pop(chave, None)
+        self.salvar()
+
+        if not silencioso:
+            embed = discord.Embed(
+                title="✅ Castigo finalizado",
+                description=(
+                    f"{membro.mention} cumpriu o mute e recebeu "
+                    f"**{len(cargos)} cargo(s)** de volta."
+                ),
+                color=COR_PRINCIPAL,
+            )
+            await self._log(embed=embed)
+
+    # ---------- limpeza ----------
     async def _apagar(self, canal):
         self.calls.pop(canal.id, None)
         self.salvar()
@@ -608,6 +769,18 @@ class CallCog(commands.Cog):
             if canal:
                 d["ordem"] = [m.id for m in canal.members]
                 d["vazia_desde"] = None if canal.members else time.time()
+
+    # ---------- devolve cargos quando o mute acaba ----------
+    @tasks.loop(seconds=10)
+    async def restaurar(self):
+        agora = time.time()
+        for chave, info in list(self.castigos.items()):
+            if agora >= info["fim"]:
+                await self._devolver(chave)
+
+    @restaurar.before_loop
+    async def antes_restaurar(self):
+        await self.bot.wait_until_ready()
 
 
 async def setup(bot):
