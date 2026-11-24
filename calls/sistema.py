@@ -1,4 +1,3 @@
-
 """
 SISTEMA DE CALLS TEMPORÁRIAS
 
@@ -8,9 +7,11 @@ SISTEMA DE CALLS TEMPORÁRIAS
 - Nome personalizado
 - Pessoas autorizadas
 - Gerenciamento privado para o dono
+- Botão para entrar na própria call
 - Adicionar pessoas a qualquer momento
 - Alterar limite a qualquer momento
 - Alternar entre pública e privada
+- Apenas uma call aberta por criador
 - Dono possui prioridade
 - Administradores também respeitam o limite
 - Call vazia por 30 segundos -> é apagada
@@ -260,7 +261,6 @@ class BotaoCriar(discord.ui.Button):
             interaction.user.id
         )
 
-        # Registra os botões persistentes.
         view.cog.bot.add_view(gerenciar)
 
         embed = GerenciarCallView.embed_gerenciamento(
@@ -496,31 +496,52 @@ class GerenciarCallView(discord.ui.View):
         dados = cog.calls.get(canal_id, {})
         privada = dados.get("privada", False)
 
+        # BOTÃO ENTRAR NA CALL
+
+        entrar = discord.ui.Button(
+            label="Entrar na call",
+            emoji="🎙️",
+            style=discord.ButtonStyle.success,
+            custom_id=f"call:gerenciar:{canal_id}:entrar",
+            row=0
+        )
+
+        # ADICIONAR PESSOAS
+
         adicionar = discord.ui.Button(
             label="Adicionar pessoas",
             emoji="➕",
             style=discord.ButtonStyle.success,
-            custom_id=f"call:gerenciar:{canal_id}:adicionar"
+            custom_id=f"call:gerenciar:{canal_id}:adicionar",
+            row=1
         )
+
+        # ALTERAR LIMITE
 
         limite = discord.ui.Button(
             label="Alterar limite",
             emoji="👥",
             style=discord.ButtonStyle.primary,
-            custom_id=f"call:gerenciar:{canal_id}:limite"
+            custom_id=f"call:gerenciar:{canal_id}:limite",
+            row=1
         )
+
+        # ALTERAR PRIVACIDADE
 
         tipo = discord.ui.Button(
             label="Tornar pública" if privada else "Tornar privada",
             emoji="🌎" if privada else "🔒",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"call:gerenciar:{canal_id}:tipo"
+            custom_id=f"call:gerenciar:{canal_id}:tipo",
+            row=1
         )
 
+        entrar.callback = self.entrar_callback
         adicionar.callback = self.adicionar_callback
         limite.callback = self.limite_callback
         tipo.callback = self.tipo_callback
 
+        self.add_item(entrar)
         self.add_item(adicionar)
         self.add_item(limite)
         self.add_item(tipo)
@@ -588,6 +609,65 @@ class GerenciarCallView(discord.ui.View):
             return None
 
         return canal, dados
+
+    # -------------------------------------------------
+    # ENTRAR NA PRÓPRIA CALL
+    # -------------------------------------------------
+
+    async def entrar_callback(self, interaction):
+
+        resultado = await self.verificar(interaction)
+
+        if not resultado:
+            return
+
+        canal, dados = resultado
+
+        membro = interaction.user
+
+        # Verifica se o usuário já está na própria call.
+        if membro.voice and membro.voice.channel:
+
+            if membro.voice.channel.id == canal.id:
+
+                return await interaction.response.send_message(
+                    "✅ Você já está na sua call!",
+                    ephemeral=True
+                )
+
+        else:
+
+            return await interaction.response.send_message(
+                "⚠️ Você precisa estar conectado a um canal de voz primeiro para que eu possa te mover.",
+                ephemeral=True
+            )
+
+        # Move o dono para a própria call.
+        try:
+
+            await membro.move_to(
+                canal,
+                reason="Dono entrou na própria call temporária"
+            )
+
+            await interaction.response.send_message(
+                f"✅ Você foi movido para sua call: {canal.mention}",
+                ephemeral=True
+            )
+
+        except discord.Forbidden:
+
+            await interaction.response.send_message(
+                "❌ Não tenho permissão para mover você. Verifique se o bot possui a permissão **Mover membros**.",
+                ephemeral=True
+            )
+
+        except discord.HTTPException:
+
+            await interaction.response.send_message(
+                "❌ Não consegui mover você para sua call. Tente novamente.",
+                ephemeral=True
+            )
 
     # -------------------------------------------------
     # ADICIONAR PESSOAS
@@ -699,7 +779,6 @@ class GerenciarCallView(discord.ui.View):
                 )
 
                 # Remove permissões individuais dos convidados.
-                # A permissão pública passa a controlar o acesso.
                 for uid in dados.get("permitidos", []):
 
                     membro = guild.get_member(uid)
@@ -1012,6 +1091,10 @@ class CallCog(commands.Cog):
         self.calls = {}
         self.locks = {}
 
+        # Trava individual para cada criador.
+        # Impede criação simultânea de várias calls.
+        self.owner_locks = {}
+
     # -------------------------------------------------
     # CICLO DE VIDA
     # -------------------------------------------------
@@ -1029,6 +1112,11 @@ class CallCog(commands.Cog):
 
             self.locks.setdefault(
                 cid,
+                asyncio.Lock()
+            )
+
+            self.owner_locks.setdefault(
+                dados["dono"],
                 asyncio.Lock()
             )
 
@@ -1124,7 +1212,7 @@ class CallCog(commands.Cog):
 
     def call_do_dono(self, guild, dono_id):
 
-        for cid, dados in self.calls.items():
+        for cid, dados in list(self.calls.items()):
 
             if dados["dono"] == dono_id:
 
@@ -1132,6 +1220,12 @@ class CallCog(commands.Cog):
 
                 if canal:
                     return canal
+
+                # Remove registro antigo caso o canal não exista.
+                self.calls.pop(cid, None)
+                self.locks.pop(cid, None)
+
+                self.salvar()
 
         return None
 
@@ -1185,7 +1279,7 @@ class CallCog(commands.Cog):
         )
 
     # -------------------------------------------------
-    # CRIAR CALL
+    # CRIAR CALL COM TRAVA POR DONO
     # -------------------------------------------------
 
     async def criar_call(
@@ -1197,16 +1291,49 @@ class CallCog(commands.Cog):
         permitidos=None
     ):
 
-        guild = interaction.guild
-        dono = interaction.user
+        dono_id = interaction.user.id
 
-        existente = self.call_do_dono(
-            guild,
-            dono.id
+        lock = self.owner_locks.setdefault(
+            dono_id,
+            asyncio.Lock()
         )
 
-        if existente:
-            return existente, True
+        async with lock:
+
+            # Verifica novamente dentro da trava.
+            # Assim, dois cliques simultâneos não criam
+            # duas calls para o mesmo usuário.
+            existente = self.call_do_dono(
+                interaction.guild,
+                dono_id
+            )
+
+            if existente:
+                return existente, True
+
+            return await self._criar_call(
+                interaction,
+                privada,
+                limite,
+                nome,
+                permitidos
+            )
+
+    # -------------------------------------------------
+    # CRIAÇÃO REAL DA CALL
+    # -------------------------------------------------
+
+    async def _criar_call(
+        self,
+        interaction,
+        privada,
+        limite,
+        nome=None,
+        permitidos=None
+    ):
+
+        guild = interaction.guild
+        dono = interaction.user
 
         if CATEGORIA_CALLS_ID:
 
@@ -1584,6 +1711,11 @@ class CallCog(commands.Cog):
 
             self.locks.setdefault(
                 cid,
+                asyncio.Lock()
+            )
+
+            self.owner_locks.setdefault(
+                dados["dono"],
                 asyncio.Lock()
             )
 
