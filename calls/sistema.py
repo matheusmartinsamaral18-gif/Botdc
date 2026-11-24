@@ -2,17 +2,16 @@
 """
 SISTEMA DE CALLS TEMPORÁRIAS
 
-- !painelcall #canal -> envia o painel de criação
-- Configuração completa antes de criar a call
-- Pública ou privada
-- Seleção de limite de pessoas
-- Nome personalizado opcional
-- Seleção antecipada de pessoas autorizadas
-- Call privada: somente pessoas autorizadas podem entrar
-- Call pública: entrada livre, respeitando o limite
-- ADM também é removido se ultrapassar o limite
-- Dono possui prioridade na própria call
-- Sem mute, retirada de cargos ou punições
+- !painelcall #canal -> envia painel compacto
+- Criação de calls públicas ou privadas
+- Limite de pessoas personalizável
+- Nome personalizado
+- Seleção de pessoas autorizadas
+- Gerenciamento após a criação
+- Adicionar pessoas a qualquer momento
+- Alterar limite a qualquer momento
+- Dono possui prioridade
+- ADM também respeita o limite
 - Call vazia por 30 segundos -> é apagada
 """
 
@@ -41,8 +40,6 @@ MAX_CONVIDADOS = 10
 COR_PRINCIPAL = 0x57F287
 COR_ALERTA = 0xED4245
 
-LINHA = "━━━━━━━━━━━━━━━━━━━━━━"
-
 ARQUIVO = os.path.join(
     os.path.dirname(__file__),
     "dados_calls.json"
@@ -50,7 +47,15 @@ ARQUIVO = os.path.join(
 
 
 # =====================================================
-# PAINEL FIXO
+# VERIFICAÇÃO DE DONO
+# =====================================================
+
+def eh_dono(interaction, dados):
+    return interaction.user.id == dados.get("dono")
+
+
+# =====================================================
+# PAINEL PRINCIPAL
 # =====================================================
 
 class PainelView(discord.ui.View):
@@ -91,14 +96,14 @@ class PainelView(discord.ui.View):
 
 
 # =====================================================
-# MODAL PARA NOME
+# MODAL DE NOME
 # =====================================================
 
-class NomeModal(discord.ui.Modal, title="Personalizar sua call"):
+class NomeModal(discord.ui.Modal, title="Nome da call"):
 
     nome = discord.ui.TextInput(
-        label="Nome da call",
-        placeholder="Digite o nome que deseja utilizar",
+        label="Nome personalizado",
+        placeholder="Digite o nome da sua call",
         required=False,
         max_length=50
     )
@@ -124,7 +129,7 @@ class NomeModal(discord.ui.Modal, title="Personalizar sua call"):
 
 
 # =====================================================
-# BOTÕES DE TIPO
+# TIPO DE CALL
 # =====================================================
 
 class BotaoTipo(discord.ui.Button):
@@ -163,7 +168,7 @@ class BotaoNome(discord.ui.Button):
     def __init__(self):
 
         super().__init__(
-            label="Personalizar nome",
+            label="Nome",
             emoji="✏️",
             style=discord.ButtonStyle.secondary,
             row=0
@@ -177,7 +182,7 @@ class BotaoNome(discord.ui.Button):
 
 
 # =====================================================
-# BOTÕES DE LIMITE
+# LIMITE INICIAL
 # =====================================================
 
 class BotaoLimite(discord.ui.Button):
@@ -208,7 +213,7 @@ class BotaoLimite(discord.ui.Button):
 
 
 # =====================================================
-# BOTÃO CRIAR
+# CRIAR CALL
 # =====================================================
 
 class BotaoCriar(discord.ui.Button):
@@ -216,7 +221,7 @@ class BotaoCriar(discord.ui.Button):
     def __init__(self):
 
         super().__init__(
-            label="Criar minha call",
+            label="Criar call",
             emoji="✅",
             style=discord.ButtonStyle.success,
             row=4
@@ -239,10 +244,7 @@ class BotaoCriar(discord.ui.Button):
         if canal is None:
 
             return await interaction.edit_original_response(
-                content=(
-                    "❌ Não consegui criar sua call.\n"
-                    "Verifique as permissões do bot."
-                ),
+                content="❌ Não consegui criar sua call. Verifique as permissões do bot.",
                 embed=None,
                 view=None
             )
@@ -250,83 +252,51 @@ class BotaoCriar(discord.ui.Button):
         if ja_existia:
 
             return await interaction.edit_original_response(
-                content=f"⚠️ Você já possui uma call aberta: {canal.mention}",
+                content=f"⚠️ Você já possui uma call: {canal.mention}",
                 embed=None,
                 view=None
             )
 
-        embed = discord.Embed(
-            title="✅ Sua call foi criada!",
-            description=(
-                f"🎙️ **Sala:** {canal.mention}\n"
-                f"👤 **Criada por:** {interaction.user.mention}\n"
-                f"{LINHA}"
-            ),
-            color=COR_PRINCIPAL
-        )
+        # Mensagem de gerenciamento no mesmo canal
+        # de texto onde a pessoa abriu o painel.
 
-        embed.add_field(
-            name="🔐 Tipo",
-            value="Privada" if view.privada else "Pública",
-            inline=True
-        )
+        try:
 
-        embed.add_field(
-            name="👥 Capacidade",
-            value=f"{view.limite} pessoas",
-            inline=True
-        )
-
-        embed.add_field(
-            name="✏️ Nome",
-            value=canal.name,
-            inline=False
-        )
-
-        if view.privada:
-
-            convidados = [
-                interaction.guild.get_member(uid)
-                for uid in view.permitidos
-                if uid != interaction.user.id
-            ]
-
-            convidados = [
-                membro for membro in convidados
-                if membro is not None
-            ]
-
-            lista = (
-                ", ".join(m.mention for m in convidados)
-                if convidados
-                else "Nenhuma pessoa adicional liberada."
+            await interaction.channel.send(
+                content=(
+                    f"⚙️ **Gerenciamento da call de {interaction.user.mention}**"
+                ),
+                embed=discord.Embed(
+                    description=(
+                        f"🎙️ **Sala:** {canal.mention}\n"
+                        f"🔐 **Tipo:** {'Privada' if view.privada else 'Pública'}\n"
+                        f"👥 **Limite:** {view.limite} pessoas\n\n"
+                        "Você pode modificar sua call quando quiser."
+                    ),
+                    color=COR_PRINCIPAL
+                ),
+                view=GerenciarCallView(
+                    view.cog,
+                    canal.id,
+                    interaction.user.id
+                )
             )
 
-            embed.add_field(
-                name="🔑 Pessoas autorizadas",
-                value=lista,
-                inline=False
-            )
+        except discord.HTTPException:
 
-            embed.set_footer(
-                text="Somente você e as pessoas autorizadas podem entrar."
-            )
-
-        else:
-
-            embed.set_footer(
-                text="Call pública. Todos podem entrar enquanto houver vagas."
+            await view.cog._log(
+                texto=f"⚠️ Não consegui enviar o painel de gerenciamento da call {canal.mention}."
             )
 
         await interaction.edit_original_response(
-            content=None,
-            embed=embed,
+            content=f"✅ Sua call foi criada: {canal.mention}",
+            embed=None,
             view=None
         )
 
 
 # =====================================================
-# BOTÃO CANCELAR
+# CANCELAR
 # =====================================================
 
 class BotaoCancelar(discord.ui.Button):
@@ -343,14 +313,14 @@ class BotaoCancelar(discord.ui.Button):
     async def callback(self, interaction):
 
         await interaction.response.edit_message(
-            content="❌ Criação da call cancelada.",
+            content="❌ Criação cancelada.",
             embed=None,
             view=None
         )
 
 
 # =====================================================
-# LIMPAR PESSOAS SELECIONADAS
+# LIMPAR CONVIDADOS
 # =====================================================
 
 class BotaoLimpar(discord.ui.Button):
@@ -358,7 +328,7 @@ class BotaoLimpar(discord.ui.Button):
     def __init__(self):
 
         super().__init__(
-            label="Limpar convidados",
+            label="Limpar",
             emoji="🧹",
             style=discord.ButtonStyle.secondary,
             row=4
@@ -371,8 +341,6 @@ class BotaoLimpar(discord.ui.Button):
         view.permitidos = []
         view.nomes_permitidos = []
 
-        view.atualizar()
-
         await interaction.response.edit_message(
             embed=view.embed(),
             view=view
@@ -380,7 +348,7 @@ class BotaoLimpar(discord.ui.Button):
 
 
 # =====================================================
-# CONFIGURAÇÃO COMPLETA DA CALL
+# CONFIGURAÇÃO INICIAL
 # =====================================================
 
 class CriarCallView(discord.ui.View):
@@ -431,15 +399,15 @@ class CriarCallView(discord.ui.View):
 
     @discord.ui.select(
         cls=discord.ui.UserSelect,
-        placeholder="🔑 Selecione quem poderá entrar na call privada",
+        placeholder="Adicionar pessoas autorizadas",
         min_values=1,
         max_values=MAX_CONVIDADOS,
         row=3
     )
     async def selecionar_permitidos(self, interaction, select):
 
-        selecionados = []
-        nomes = []
+        selecionados = list(self.permitidos)
+        nomes = list(self.nomes_permitidos)
 
         for usuario in select.values:
 
@@ -452,13 +420,12 @@ class CriarCallView(discord.ui.View):
                 continue
 
             if membro.id not in selecionados:
+
                 selecionados.append(membro.id)
                 nomes.append(membro.display_name)
 
-        self.permitidos = selecionados
-        self.nomes_permitidos = nomes
-
-        self.atualizar()
+        self.permitidos = selecionados[:MAX_CONVIDADOS]
+        self.nomes_permitidos = nomes[:MAX_CONVIDADOS]
 
         await interaction.response.edit_message(
             embed=self.embed(),
@@ -492,93 +459,350 @@ class CriarCallView(discord.ui.View):
     def embed(self):
 
         e = discord.Embed(
-            title="📞 CONFIGURE SUA CALL",
-            description=(
-                "Personalize sua sala antes de criá-la!\n"
-                "Todas as opções estão disponíveis nesta tela.\n\n"
-                f"{LINHA}\n"
-                "**1️⃣ ESCOLHA O TIPO DE CALL**\n\n"
-                "🌎 **Pública:** qualquer pessoa pode entrar.\n"
-                "🔒 **Privada:** somente você e as pessoas "
-                "que você liberar poderão entrar.\n\n"
-                "**2️⃣ DEFINA A CAPACIDADE**\n\n"
-                "👥 Escolha quantas pessoas poderão ficar na sala.\n\n"
-                "**3️⃣ PERSONALIZE O NOME**\n\n"
-                "✏️ Você pode colocar qualquer nome ou deixar "
-                "o nome padrão.\n\n"
-                "**4️⃣ LIBERE QUEM PODERÁ ENTRAR**\n\n"
-                "🔑 Use o seletor abaixo para escolher as pessoas "
-                "autorizadas a entrar na sua call privada.\n"
-                "Essa opção só funciona quando a call é privada.\n\n"
-                f"{LINHA}"
-            ),
+            title="📞 Criar sua call",
             color=COR_PRINCIPAL
         )
 
         e.add_field(
-            name="🔐 Tipo selecionado",
+            name="Tipo",
             value="🔒 Privada" if self.privada else "🌎 Pública",
             inline=True
         )
 
         e.add_field(
-            name="👥 Limite",
-            value=f"{self.limite} pessoas",
+            name="Limite",
+            value=f"👥 {self.limite} pessoas",
             inline=True
         )
 
         e.add_field(
-            name="✏️ Nome da sala",
+            name="Nome",
             value=self.nome or f"Call de {self.dono_nome}",
             inline=False
         )
 
-        if self.permitidos:
-
-            lista = "\n".join(
-                f"• {nome}"
-                for nome in self.nomes_permitidos
-            )
-
-        else:
-
-            lista = "Nenhuma pessoa adicional selecionada."
-
         e.add_field(
-            name=f"🔑 Pessoas liberadas ({len(self.permitidos)})",
-            value=lista[:1024],
+            name=f"Autorizados ({len(self.permitidos)})",
+            value=", ".join(self.nomes_permitidos) or "Nenhum",
             inline=False
         )
 
-        if self.privada:
+        return e
 
-            e.add_field(
-                name="🛡️ Proteção ativada",
-                value=(
-                    "Pessoas não autorizadas serão removidas "
-                    "da call automaticamente.\n"
-                    "Não haverá mute nem retirada de cargos."
+
+# =====================================================
+# GERENCIAMENTO APÓS CRIAR
+# =====================================================
+
+class GerenciarCallView(discord.ui.View):
+
+    def __init__(self, cog, canal_id, dono_id):
+
+        super().__init__(timeout=None)
+
+        self.cog = cog
+        self.canal_id = canal_id
+        self.dono_id = dono_id
+
+    async def verificar(self, interaction):
+
+        dados = self.cog.calls.get(self.canal_id)
+
+        if not dados:
+
+            await interaction.response.send_message(
+                "❌ Essa call não existe mais.",
+                ephemeral=True
+            )
+
+            return None
+
+        if not eh_dono(interaction, dados):
+
+            await interaction.response.send_message(
+                "❌ Somente o dono da call pode gerenciá-la.",
+                ephemeral=True
+            )
+
+            return None
+
+        canal = interaction.guild.get_channel(
+            self.canal_id
+        )
+
+        if canal is None:
+
+            await interaction.response.send_message(
+                "❌ A call não foi encontrada.",
+                ephemeral=True
+            )
+
+            return None
+
+        return canal, dados
+
+    @discord.ui.button(
+        label="Adicionar pessoas",
+        emoji="➕",
+        style=discord.ButtonStyle.success,
+        custom_id="call:gerenciar:adicionar"
+    )
+    async def adicionar(self, interaction, button):
+
+        resultado = await self.verificar(interaction)
+
+        if not resultado:
+            return
+
+        view = AdicionarPessoasView(
+            self.cog,
+            self.canal_id,
+            self.dono_id
+        )
+
+        await interaction.response.send_message(
+            content="Selecione as pessoas que deseja liberar:",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Alterar limite",
+        emoji="👥",
+        style=discord.ButtonStyle.primary,
+        custom_id="call:gerenciar:limite"
+    )
+    async def alterar_limite(self, interaction, button):
+
+        resultado = await self.verificar(interaction)
+
+        if not resultado:
+            return
+
+        view = AlterarLimiteView(
+            self.cog,
+            self.canal_id,
+            self.dono_id
+        )
+
+        await interaction.response.send_message(
+            content="Escolha o novo limite da sua call:",
+            view=view,
+            ephemeral=True
+        )
+
+
+# =====================================================
+# ADICIONAR PESSOAS DEPOIS DA CRIAÇÃO
+# =====================================================
+
+class AdicionarPessoasView(discord.ui.View):
+
+    def __init__(self, cog, canal_id, dono_id):
+
+        super().__init__(timeout=180)
+
+        self.cog = cog
+        self.canal_id = canal_id
+        self.dono_id = dono_id
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="Selecione quem poderá entrar",
+        min_values=1,
+        max_values=MAX_CONVIDADOS
+    )
+    async def selecionar(self, interaction, select):
+
+        dados = self.cog.calls.get(self.canal_id)
+
+        if not dados:
+            return await interaction.response.send_message(
+                "❌ Essa call não existe mais.",
+                ephemeral=True
+            )
+
+        if not eh_dono(interaction, dados):
+            return await interaction.response.send_message(
+                "❌ Somente o dono pode adicionar pessoas.",
+                ephemeral=True
+            )
+
+        canal = interaction.guild.get_channel(
+            self.canal_id
+        )
+
+        if canal is None:
+            return await interaction.response.send_message(
+                "❌ Call não encontrada.",
+                ephemeral=True
+            )
+
+        adicionados = []
+
+        permitidos = dados.setdefault(
+            "permitidos",
+            [self.dono_id]
+        )
+
+        for usuario in select.values:
+
+            membro = interaction.guild.get_member(
+                usuario.id
+            )
+
+            if membro is None or membro.bot:
+                continue
+
+            if membro.id == self.dono_id:
+                continue
+
+            if membro.id not in permitidos:
+
+                permitidos.append(membro.id)
+
+            if dados.get("privada", False):
+
+                try:
+
+                    await canal.set_permissions(
+                        membro,
+                        view_channel=True,
+                        connect=True,
+                        speak=True
+                    )
+
+                except discord.HTTPException:
+                    continue
+
+            adicionados.append(membro.mention)
+
+        self.cog.salvar()
+
+        if adicionados:
+
+            await interaction.response.edit_message(
+                content=(
+                    "✅ Pessoas adicionadas:\n"
+                    + "\n".join(adicionados)
                 ),
-                inline=False
+                view=None
             )
 
         else:
 
-            e.add_field(
-                name="🌎 Call pública",
-                value=(
-                    "Todos poderão entrar enquanto houver vagas. "
-                    "Se alguém ultrapassar o limite, será desconectado, "
-                    "inclusive administradores."
-                ),
-                inline=False
+            await interaction.response.edit_message(
+                content="⚠️ Nenhuma pessoa nova foi adicionada.",
+                view=None
             )
 
-        e.set_footer(
-            text="Confira suas escolhas e clique em Criar minha call."
+
+# =====================================================
+# ALTERAR LIMITE DEPOIS DA CRIAÇÃO
+# =====================================================
+
+class AlterarLimiteView(discord.ui.View):
+
+    def __init__(self, cog, canal_id, dono_id):
+
+        super().__init__(timeout=180)
+
+        self.cog = cog
+        self.canal_id = canal_id
+        self.dono_id = dono_id
+
+        opcoes = [
+            discord.SelectOption(
+                label=f"{n} pessoas",
+                value=str(n),
+                emoji="👥"
+            )
+            for n in LIMITES
+        ]
+
+        select = discord.ui.Select(
+            placeholder="Escolha o novo limite",
+            options=opcoes
         )
 
-        return e
+        select.callback = self.selecionar_limite
+
+        self.add_item(select)
+
+    async def selecionar_limite(self, interaction):
+
+        dados = self.cog.calls.get(self.canal_id)
+
+        if not dados:
+            return await interaction.response.send_message(
+                "❌ Essa call não existe mais.",
+                ephemeral=True
+            )
+
+        if not eh_dono(interaction, dados):
+            return await interaction.response.send_message(
+                "❌ Somente o dono pode alterar o limite.",
+                ephemeral=True
+            )
+
+        canal = interaction.guild.get_channel(
+            self.canal_id
+        )
+
+        if canal is None:
+            return await interaction.response.send_message(
+                "❌ Call não encontrada.",
+                ephemeral=True
+            )
+
+        limite = int(interaction.data["values"][0])
+
+        try:
+
+            await canal.edit(
+                user_limit=limite,
+                reason="Limite alterado pelo dono da call"
+            )
+
+        except discord.HTTPException:
+
+            return await interaction.response.send_message(
+                "❌ Não consegui alterar o limite.",
+                ephemeral=True
+            )
+
+        dados["limite"] = limite
+
+        self.cog.salvar()
+
+        await interaction.response.edit_message(
+            content=f"✅ Limite da sua call alterado para **{limite} pessoas**.",
+            view=None
+        )
+
+        # Verifica imediatamente se o limite foi ultrapassado.
+        if len(canal.members) > limite:
+
+            for membro in reversed(canal.members):
+
+                if len(canal.members) <= limite:
+                    break
+
+                if membro.id == dados.get("dono"):
+                    continue
+
+                if membro.bot:
+                    continue
+
+                try:
+
+                    await membro.move_to(
+                        None,
+                        reason="Novo limite da call ultrapassado"
+                    )
+
+                except discord.HTTPException:
+                    pass
 
 
 # =====================================================
@@ -592,9 +816,6 @@ class CallCog(commands.Cog):
         self.bot = bot
 
         self.calls = {}
-
-        # Evita processamentos simultâneos de entrada
-        # no mesmo canal de voz.
         self.locks = {}
 
     # -------------------------------------------------
@@ -606,6 +827,11 @@ class CallCog(commands.Cog):
         self.carregar()
 
         self.bot.add_view(PainelView(self))
+
+        # View de gerenciamento persistente.
+        self.bot.add_view(
+            GerenciarCallView(self, 0, 0)
+        )
 
         self.limpeza.start()
 
@@ -637,16 +863,11 @@ class CallCog(commands.Cog):
             for k, v in bruto.items()
         }
 
-        # Compatibilidade com o arquivo antigo.
         for dados in self.calls.values():
 
             dados.setdefault("ordem", [])
             dados.setdefault("permitidos", [])
-
-            dados.setdefault(
-                "vazia_desde",
-                time.time()
-            )
+            dados.setdefault("vazia_desde", time.time())
 
     def salvar(self):
 
@@ -708,7 +929,7 @@ class CallCog(commands.Cog):
         return None
 
     # -------------------------------------------------
-    # COMANDO DO PAINEL
+    # PAINEL
     # -------------------------------------------------
 
     @commands.command(name="painelcall")
@@ -730,37 +951,11 @@ class CallCog(commands.Cog):
             )
 
         embed = discord.Embed(
-            title="🎙️ CENTRAL DE CALLS",
+            title="🎙️ CALLS TEMPORÁRIAS",
             description=(
-                "Crie sua própria sala de voz temporária!\n\n"
-                "Basta clicar no botão **Abrir call** e configurar "
-                "tudo antes de criar sua sala.\n\n"
-                f"{LINHA}\n"
-                "**📋 COMO FUNCIONA?**\n\n"
-                "🌎 **Call pública**\n"
-                "Todos podem entrar enquanto houver vagas. "
-                "O bot também controla o limite para administradores.\n\n"
-                "🔒 **Call privada**\n"
-                "Somente você e as pessoas que você autorizar "
-                "poderão entrar.\n\n"
-                "👥 **Limite de pessoas**\n"
-                "Escolha a capacidade da sua sala. "
-                "O limite será respeitado mesmo para administradores.\n\n"
-                "✏️ **Nome personalizado**\n"
-                "Escolha o nome que quiser ou utilize o padrão.\n\n"
-                "🔑 **Liberar pessoas**\n"
-                "Na configuração inicial, você poderá selecionar "
-                "quem terá autorização para entrar na sua call privada.\n\n"
-                f"{LINHA}\n"
-                "**🛡️ PROTEÇÃO**\n\n"
-                "Nas calls privadas, quem não estiver autorizado "
-                "será desconectado.\n"
-                "Nas calls cheias, quem ultrapassar a capacidade "
-                "também será desconectado.\n\n"
-                "Não existe punição, mute ou retirada de cargos.\n\n"
-                "**⏱️ ENCERRAMENTO AUTOMÁTICO**\n\n"
-                f"Se a call ficar vazia por {TEMPO_VAZIA_SEG} segundos, "
-                "ela será apagada automaticamente."
+                "Crie sua própria sala de voz e personalize "
+                "as configurações como quiser!\n\n"
+                "**📞 Clique abaixo para começar.**"
             ),
             color=COR_PRINCIPAL
         )
@@ -768,21 +963,17 @@ class CallCog(commands.Cog):
         if ctx.guild.icon:
             embed.set_thumbnail(url=ctx.guild.icon.url)
 
-        embed.set_footer(
-            text="📞 Clique abaixo para configurar e criar sua call!"
-        )
-
         await canal.send(
             embed=embed,
             view=PainelView(self)
         )
 
         await ctx.send(
-            f"✅ Painel de calls enviado em {canal.mention}!"
+            f"✅ Painel enviado em {canal.mention}!"
         )
 
     # -------------------------------------------------
-    # CRIAÇÃO DA CALL
+    # CRIAR CALL
     # -------------------------------------------------
 
     async def criar_call(
@@ -878,9 +1069,7 @@ class CallCog(commands.Cog):
         self.calls[canal.id] = {
 
             "dono": dono.id,
-
             "limite": limite,
-
             "privada": privada,
 
             "permitidos": list(
@@ -888,7 +1077,6 @@ class CallCog(commands.Cog):
             ),
 
             "ordem": [],
-
             "vazia_desde": time.time()
 
         }
@@ -927,8 +1115,6 @@ class CallCog(commands.Cog):
         if before.channel == after.channel:
             return
 
-        # Saiu de uma call temporária.
-
         if (
             before.channel
             and before.channel.id in self.calls
@@ -946,8 +1132,6 @@ class CallCog(commands.Cog):
 
             self.salvar()
 
-        # Entrou em uma call temporária.
-
         if (
             after.channel
             and after.channel.id in self.calls
@@ -959,7 +1143,6 @@ class CallCog(commands.Cog):
 
             ordem = dados.setdefault("ordem", [])
 
-            # Registra a ordem de entrada.
             if member.id in ordem:
                 ordem.remove(member.id)
 
@@ -973,7 +1156,7 @@ class CallCog(commands.Cog):
             )
 
     # -------------------------------------------------
-    # PROTEÇÃO E CONTROLE DE LIMITE
+    # PROTEÇÃO E LIMITE
     # -------------------------------------------------
 
     async def _verificar_entrada(self, member, canal):
@@ -993,13 +1176,11 @@ class CallCog(commands.Cog):
 
         async with lock:
 
-            # Confirma que a call ainda existe.
             dados = self.calls.get(canal.id)
 
             if not dados:
                 return
 
-            # Confirma que a pessoa ainda está na call.
             if member.voice is None:
                 return
 
@@ -1009,9 +1190,7 @@ class CallCog(commands.Cog):
             if member.voice.channel.id != canal.id:
                 return
 
-            # -----------------------------------------
-            # 1. VERIFICAR PRIVACIDADE
-            # -----------------------------------------
+            # PRIVACIDADE
 
             if dados.get("privada", False):
 
@@ -1023,38 +1202,26 @@ class CallCog(commands.Cog):
 
                         await member.move_to(
                             None,
-                            reason=(
-                                "Entrada em call privada "
-                                "sem autorização"
-                            )
+                            reason="Entrada não autorizada em call privada"
                         )
 
                         await self._log(
                             texto=(
                                 f"🔒 {member.mention} tentou entrar "
                                 f"na call privada {canal.mention} "
-                                "sem autorização e foi desconectado."
+                                "sem autorização."
                             )
                         )
 
-                    except (
-                        discord.Forbidden,
-                        discord.HTTPException
-                    ):
+                    except discord.HTTPException:
 
                         await self._log(
-                            texto=(
-                                f"⚠️ Não consegui desconectar "
-                                f"{member.mention} da call privada "
-                                f"{canal.mention}. Verifique as permissões."
-                            )
+                            texto=f"⚠️ Não consegui desconectar {member.mention}."
                         )
 
                     return
 
-            # -----------------------------------------
-            # 2. VERIFICAR LIMITE DE PESSOAS
-            # -----------------------------------------
+            # LIMITE
 
             limite = dados.get("limite", canal.user_limit)
 
@@ -1066,19 +1233,15 @@ class CallCog(commands.Cog):
             if quantidade <= limite:
                 return
 
-            # O dono tem prioridade.
             dono_id = dados.get("dono")
 
             candidatos = [
                 pessoa
                 for pessoa in canal.members
                 if pessoa.id != dono_id
+                and not pessoa.bot
             ]
 
-            if not candidatos:
-                return
-
-            # Identifica quem entrou por último.
             ordem = dados.setdefault("ordem", [])
 
             candidatos.sort(
@@ -1092,26 +1255,14 @@ class CallCog(commands.Cog):
 
             excesso = quantidade - limite
 
-            removidos = []
-
-            # Remove os últimos participantes até
-            # que a capacidade seja respeitada.
-            for pessoa in candidatos:
-
-                if len(removidos) >= excesso:
-                    break
+            for pessoa in candidatos[:excesso]:
 
                 try:
 
                     await pessoa.move_to(
                         None,
-                        reason=(
-                            f"Limite de {limite} pessoas "
-                            "da call temporária ultrapassado"
-                        )
+                        reason=f"Limite de {limite} pessoas ultrapassado"
                     )
-
-                    removidos.append(pessoa)
 
                     if pessoa.id in ordem:
                         ordem.remove(pessoa.id)
@@ -1119,23 +1270,14 @@ class CallCog(commands.Cog):
                     await self._log(
                         texto=(
                             f"👥 {pessoa.mention} foi desconectado "
-                            f"de {canal.mention} porque a call "
-                            f"ultrapassou o limite de {limite} pessoas."
+                            f"de {canal.mention} pelo limite de pessoas."
                         )
                     )
 
-                except (
-                    discord.Forbidden,
-                    discord.HTTPException
-                ):
+                except discord.HTTPException:
 
                     await self._log(
-                        texto=(
-                            f"⚠️ Não consegui desconectar "
-                            f"{pessoa.mention} de {canal.mention}. "
-                            "Verifique as permissões e a hierarquia "
-                            "do bot."
-                        )
+                        texto=f"⚠️ Não consegui desconectar {pessoa.mention}."
                     )
 
             self.salvar()
@@ -1167,7 +1309,7 @@ class CallCog(commands.Cog):
             pass
 
     # -------------------------------------------------
-    # DETECTAR EXCLUSÃO MANUAL
+    # EXCLUSÃO MANUAL
     # -------------------------------------------------
 
     @commands.Cog.listener()
@@ -1228,8 +1370,6 @@ class CallCog(commands.Cog):
 
         await self.bot.wait_until_ready()
 
-        # Reconstruir estado das calls após reiniciar.
-
         for cid, dados in self.calls.items():
 
             canal = self.bot.get_channel(cid)
@@ -1241,7 +1381,6 @@ class CallCog(commands.Cog):
 
             if canal:
 
-                # Recupera os participantes atuais.
                 dados["ordem"] = [
                     membro.id
                     for membro in canal.members
