@@ -6,14 +6,14 @@ from pathlib import Path
 
 from config import bot
 
+
 SITE_IDS = "https://ff-item.netlify.app/"
 REQUEST_CHANNEL_NAME = "solicitacoes-skins"
-
 DATA_FILE = Path(__file__).with_name("skins_requests.json")
 
 
 # =========================================================
-# ARMAZENAMENTO DOS PEDIDOS
+# ARMAZENAMENTO
 # =========================================================
 
 def load_requests():
@@ -22,7 +22,7 @@ def load_requests():
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as erro:
-        print(f"Erro carregando pedidos de skins: {erro}")
+        print(f"Erro carregando pedidos: {erro}")
 
     return {}
 
@@ -32,12 +32,11 @@ def save_requests(data):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
     except Exception as erro:
-        print(f"Erro salvando pedidos de skins: {erro}")
+        print(f"Erro salvando pedidos: {erro}")
 
 
 def get_request(message_id):
-    data = load_requests()
-    return data.get(str(message_id))
+    return load_requests().get(str(message_id))
 
 
 def update_request(message_id, **changes):
@@ -56,7 +55,7 @@ def update_request(message_id, **changes):
 # PERMISSAO EXCLUSIVA DO DONO
 # =========================================================
 
-def is_server_owner(interaction: discord.Interaction):
+def is_server_owner(interaction):
 
     return (
         interaction.guild is not None
@@ -116,64 +115,318 @@ async def get_request_channel(guild, panel_channel):
 
 
 # =========================================================
-# SEGUNDA ETAPA
+# CONFIGURACAO DOS CAMPOS
 # =========================================================
 
-class SkinSecondModal(discord.ui.Modal):
+FIELDS = {
+    "name": {
+        "label": "Personagem / famoso",
+        "button": "🌟 Personagem",
+        "placeholder": "Ex: Naruto, Cristiano Ronaldo...",
+        "required": True,
+    },
+    "head": {
+        "label": "ID da cabeça",
+        "button": "🧑 Cabeça",
+        "placeholder": "Digite o ID da cabeça",
+        "required": True,
+    },
+    "face": {
+        "label": "ID do rosto",
+        "button": "👤 Rosto",
+        "placeholder": "Digite o ID do rosto",
+        "required": True,
+    },
+    "mask": {
+        "label": "ID da máscara",
+        "button": "🎭 Máscara",
+        "placeholder": "Digite o ID da máscara",
+        "required": True,
+    },
+    "shirt": {
+        "label": "ID da camisa",
+        "button": "👕 Camisa",
+        "placeholder": "Digite o ID da camisa",
+        "required": True,
+    },
+    "pants": {
+        "label": "ID da calça / short",
+        "button": "👖 Calça",
+        "placeholder": "Digite o ID da calça",
+        "required": True,
+    },
+    "shoes": {
+        "label": "ID do tênis",
+        "button": "👟 Tênis",
+        "placeholder": "Digite o ID do tênis",
+        "required": True,
+    },
+    "weapon": {
+        "label": "ID da arma",
+        "button": "🔫 Arma",
+        "placeholder": "Opcional: digite o ID da arma",
+        "required": False,
+    },
+}
 
-    def __init__(self, category_name, panel_channel, first_values):
+
+# =========================================================
+# MODAL DE UM CAMPO
+# =========================================================
+
+class SkinFieldModal(discord.ui.Modal):
+
+    def __init__(self, form_view, field_key):
+
+        config = FIELDS[field_key]
 
         super().__init__(
-            title="Finalizar pedido de skin"
+            title=f"Preencher • {config['label']}"
         )
+
+        self.form_view = form_view
+        self.field_key = field_key
+
+        self.value_input = discord.ui.TextInput(
+            label=config["label"],
+            placeholder=config["placeholder"],
+            required=config["required"],
+            max_length=100,
+            default=form_view.values.get(field_key, ""),
+        )
+
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction):
+
+        self.form_view.values[self.field_key] = (
+            self.value_input.value.strip()
+        )
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Atualiza o painel original com o campo preenchido.
+        try:
+            await self.form_view.panel_interaction.edit_original_response(
+                embed=self.form_view.create_embed(),
+                view=self.form_view,
+            )
+        except Exception as erro:
+            print(f"Erro atualizando painel de skins: {erro}")
+
+
+# =========================================================
+# BOTAO INDIVIDUAL DE PREENCHIMENTO
+# =========================================================
+
+class SkinFieldButton(discord.ui.Button):
+
+    def __init__(self, form_view, field_key, row):
+
+        config = FIELDS[field_key]
+
+        super().__init__(
+            label=config["button"],
+            style=discord.ButtonStyle.secondary,
+            row=row,
+        )
+
+        self.form_view = form_view
+        self.field_key = field_key
+
+    async def callback(self, interaction):
+
+        await interaction.response.send_modal(
+            SkinFieldModal(
+                self.form_view,
+                self.field_key,
+            )
+        )
+
+
+# =========================================================
+# PAINEL DE PREENCHIMENTO
+# =========================================================
+
+class SkinFormView(discord.ui.View):
+
+    def __init__(
+        self,
+        category_name,
+        panel_channel,
+        panel_interaction,
+    ):
+
+        super().__init__(timeout=900)
 
         self.category_name = category_name
         self.panel_channel = panel_channel
-        self.first_values = first_values
+        self.panel_interaction = panel_interaction
 
-        self.pants = discord.ui.TextInput(
-            label="ID da calça / short",
-            placeholder="Informe o ID da peça",
-            required=True,
-            max_length=100,
+        self.values = {
+            "name": "",
+            "head": "",
+            "face": "",
+            "mask": "",
+            "shirt": "",
+            "pants": "",
+            "shoes": "",
+            "weapon": "",
+        }
+
+        # Cada peça possui seu próprio botão.
+
+        field_rows = {
+            "name": 0,
+            "head": 0,
+            "face": 1,
+            "mask": 1,
+            "shirt": 2,
+            "pants": 2,
+            "shoes": 3,
+            "weapon": 3,
+        }
+
+        for key, row in field_rows.items():
+            self.add_item(
+                SkinFieldButton(self, key, row)
+            )
+
+        self.add_item(
+            discord.ui.Button(
+                label="Consultar IDs",
+                emoji="🌐",
+                style=discord.ButtonStyle.link,
+                url=SITE_IDS,
+                row=4,
+            )
         )
 
-        self.shoes = discord.ui.TextInput(
-            label="ID do tênis",
-            placeholder="Informe o ID do tênis",
-            required=True,
-            max_length=100,
+    def create_embed(self):
+
+        embed = discord.Embed(
+            title="📞 CRIAR SUA SKIN",
+            description=(
+                "**CONEXÃO • THEUSSYT**\n\n"
+                "Personalize sua skin antes de enviar.\n"
+                "Clique nos botões para preencher cada peça.\n\n"
+                "━━━━━━━━━━━━━━━━━━"
+            ),
+            color=0x2ECC71,
         )
 
-        self.weapon = discord.ui.TextInput(
-            label="ID da arma (opcional)",
-            placeholder="Deixe vazio se não desejar",
-            required=False,
-            max_length=100,
+        embed.add_field(
+            name="📂 Categoria",
+            value=self.category_name,
+            inline=False,
         )
 
-        self.add_item(self.pants)
-        self.add_item(self.shoes)
-        self.add_item(self.weapon)
+        field_emojis = {
+            "name": "🌟",
+            "head": "🧑",
+            "face": "👤",
+            "mask": "🎭",
+            "shirt": "👕",
+            "pants": "👖",
+            "shoes": "👟",
+            "weapon": "🔫",
+        }
 
-    async def on_submit(self, interaction: discord.Interaction):
+        field_names = {
+            "name": "Personagem",
+            "head": "Cabeça",
+            "face": "Rosto",
+            "mask": "Máscara",
+            "shirt": "Camisa",
+            "pants": "Calça / short",
+            "shoes": "Tênis",
+            "weapon": "Arma",
+        }
 
-        guild = interaction.guild
+        for key in FIELDS:
 
-        if guild is None:
+            value = self.values.get(key, "")
+
+            if value:
+                display = discord.utils.escape_mentions(value)
+            elif key == "weapon":
+                display = "Não informado (opcional)"
+            else:
+                display = "Não preenchido"
+
+            embed.add_field(
+                name=f"{field_emojis[key]} {field_names[key]}",
+                value=display,
+                inline=True,
+            )
+
+        required_fields = [
+            key for key, config in FIELDS.items()
+            if config["required"]
+        ]
+
+        completed = sum(
+            1 for key in required_fields
+            if self.values.get(key)
+        )
+
+        embed.add_field(
+            name="📋 Progresso",
+            value=f"**{completed}/{len(required_fields)} campos obrigatórios preenchidos**",
+            inline=False,
+        )
+
+        embed.set_footer(
+            text="Preencha os campos e depois clique em Enviar solicitação."
+        )
+
+        return embed
+
+    async def refresh(self):
+
+        await self.panel_interaction.edit_original_response(
+            embed=self.create_embed(),
+            view=self,
+        )
+
+    @discord.ui.button(
+        label="Enviar solicitação",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+        row=4,
+    )
+    async def submit_request(self, interaction, button):
+
+        missing = [
+            FIELDS[key]["label"]
+            for key, config in FIELDS.items()
+            if config["required"] and not self.values.get(key)
+        ]
+
+        if missing:
+
             return await interaction.response.send_message(
-                "Não foi possível identificar o servidor.",
+                "❌ **Ainda faltam alguns campos!**\n\n"
+                + "\n".join(f"• {field}" for field in missing),
                 ephemeral=True,
             )
 
+        await interaction.response.defer(ephemeral=True)
+
         try:
+
+            guild = interaction.guild
+
+            if guild is None:
+                return await interaction.followup.send(
+                    "Não foi possível identificar o servidor.",
+                    ephemeral=True,
+                )
 
             destination = await get_request_channel(
                 guild,
                 self.panel_channel,
             )
-
-            v = self.first_values
 
             embed = discord.Embed(
                 title="📨 NOVA SOLICITAÇÃO DE SKIN",
@@ -198,65 +451,26 @@ class SkinSecondModal(discord.ui.Modal):
                 inline=False,
             )
 
-            embed.add_field(
-                name="🌟 Famoso / personagem",
-                value=discord.utils.escape_mentions(
-                    v["name"]
-                ),
-                inline=False,
-            )
+            field_names = {
+                "name": "🌟 Famoso / personagem",
+                "head": "🧑 Cabeça",
+                "face": "👤 Rosto",
+                "mask": "🎭 Máscara",
+                "shirt": "👕 Camisa",
+                "pants": "👖 Calça / short",
+                "shoes": "👟 Tênis",
+                "weapon": "🔫 Arma",
+            }
 
-            embed.add_field(
-                name="🧑 Cabeça",
-                value=discord.utils.escape_mentions(v["head"]),
-                inline=True,
-            )
+            for key, label in field_names.items():
 
-            embed.add_field(
-                name="👤 Rosto",
-                value=discord.utils.escape_mentions(v["face"]),
-                inline=True,
-            )
+                value = self.values.get(key) or "Não informado"
 
-            embed.add_field(
-                name="🎭 Máscara",
-                value=discord.utils.escape_mentions(v["mask"]),
-                inline=True,
-            )
-
-            embed.add_field(
-                name="👕 Camisa",
-                value=discord.utils.escape_mentions(v["shirt"]),
-                inline=True,
-            )
-
-            embed.add_field(
-                name="👖 Calça / short",
-                value=discord.utils.escape_mentions(
-                    self.pants.value
-                ),
-                inline=True,
-            )
-
-            embed.add_field(
-                name="👟 Tênis",
-                value=discord.utils.escape_mentions(
-                    self.shoes.value
-                ),
-                inline=True,
-            )
-
-            embed.add_field(
-                name="🔫 Arma",
-                value=(
-                    discord.utils.escape_mentions(
-                        self.weapon.value
-                    )
-                    if self.weapon.value
-                    else "Não informado"
-                ),
-                inline=False,
-            )
+                embed.add_field(
+                    name=label,
+                    value=discord.utils.escape_mentions(value),
+                    inline=key != "name",
+                )
 
             embed.set_footer(
                 text="Status: Pendente de análise"
@@ -275,21 +489,35 @@ class SkinSecondModal(discord.ui.Modal):
                 "requester_id": interaction.user.id,
                 "status": "pending",
                 "category": self.category_name,
-                "character": v["name"],
+                "character": self.values["name"],
             }
 
             save_requests(data)
 
-            await interaction.response.send_message(
-                "✅ **Pedido enviado com sucesso!**\n\n"
-                "Sua sugestão foi encaminhada para a equipe.",
-                ephemeral=True,
+            # Finaliza o painel de preenchimento.
+
+            for item in self.children:
+                item.disabled = True
+
+            await interaction.edit_original_response(
+                content="",
+                embed=discord.Embed(
+                    title="✅ SOLICITAÇÃO ENVIADA!",
+                    description=(
+                        "Sua sugestão foi encaminhada "
+                        "para análise da equipe.\n\n"
+                        "Obrigado por contribuir com o mapa "
+                        "**CONEXÃO • THEUSSYT**!"
+                    ),
+                    color=0x2ECC71,
+                ),
+                view=None,
             )
 
         except discord.Forbidden:
 
-            await interaction.response.send_message(
-                "❌ Não tenho permissões para acessar "
+            await interaction.followup.send(
+                "❌ Não tenho permissão para acessar "
                 "ou enviar mensagens no canal privado.",
                 ephemeral=True,
             )
@@ -298,159 +526,23 @@ class SkinSecondModal(discord.ui.Modal):
 
             print(f"Erro enviando solicitacao: {erro}")
 
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "❌ Ocorreu um erro ao enviar o pedido.",
-                    ephemeral=True,
-                )
-
-
-# =========================================================
-# BOTAO DE FINALIZACAO
-# =========================================================
-
-class ContinueRequestView(discord.ui.View):
-
-    def __init__(self, category_name, panel_channel, values):
-
-        super().__init__(timeout=300)
-
-        self.category_name = category_name
-        self.panel_channel = panel_channel
-        self.values = values
-
-        self.add_item(
-            discord.ui.Button(
-                label="Consultar IDs",
-                emoji="🌐",
-                style=discord.ButtonStyle.link,
-                url=SITE_IDS,
+            await interaction.followup.send(
+                "❌ Ocorreu um erro ao enviar o pedido.",
+                ephemeral=True,
             )
-        )
 
     @discord.ui.button(
-        label="Preencher peças restantes",
-        emoji="➡️",
-        style=discord.ButtonStyle.success,
+        label="Cancelar",
+        emoji="❌",
+        style=discord.ButtonStyle.danger,
+        row=4,
     )
-    async def continue_form(self, interaction, button):
+    async def cancel_request(self, interaction, button):
 
-        await interaction.response.send_modal(
-            SkinSecondModal(
-                self.category_name,
-                self.panel_channel,
-                self.values,
-            )
-        )
-
-
-# =========================================================
-# PRIMEIRA ETAPA
-# =========================================================
-
-class SkinFirstModal(discord.ui.Modal):
-
-    def __init__(self, category_name, panel_channel):
-
-        super().__init__(
-            title="Criar skin • Primeira etapa"
-        )
-
-        self.category_name = category_name
-        self.panel_channel = panel_channel
-
-        self.famous = discord.ui.TextInput(
-            label="Nome do famoso / personagem",
-            placeholder="Ex: Naruto, Cristiano Ronaldo...",
-            required=True,
-            max_length=100,
-        )
-
-        self.head = discord.ui.TextInput(
-            label="ID da cabeça",
-            placeholder="Digite o ID da cabeça",
-            required=True,
-            max_length=100,
-        )
-
-        self.face = discord.ui.TextInput(
-            label="ID do rosto",
-            placeholder="Digite o ID do rosto",
-            required=True,
-            max_length=100,
-        )
-
-        self.mask = discord.ui.TextInput(
-            label="ID da máscara",
-            placeholder="Digite o ID da máscara",
-            required=True,
-            max_length=100,
-        )
-
-        self.shirt = discord.ui.TextInput(
-            label="ID da camisa",
-            placeholder="Digite o ID da camisa",
-            required=True,
-            max_length=100,
-        )
-
-        self.add_item(self.famous)
-        self.add_item(self.head)
-        self.add_item(self.face)
-        self.add_item(self.mask)
-        self.add_item(self.shirt)
-
-    async def on_submit(self, interaction: discord.Interaction):
-
-        values = {
-            "name": self.famous.value,
-            "head": self.head.value,
-            "face": self.face.value,
-            "mask": self.mask.value,
-            "shirt": self.shirt.value,
-        }
-
-        embed = discord.Embed(
-            title="✨ PRIMEIRA ETAPA CONCLUÍDA",
-            description=(
-                "Seus primeiros dados foram preenchidos!\n\n"
-                "Agora falta informar a calça, o tênis "
-                "e, caso queira, a arma.\n\n"
-                "Clique no botão abaixo para continuar."
-            ),
-            color=0x2ECC71,
-        )
-
-        embed.add_field(
-            name="📂 Categoria",
-            value=discord.utils.escape_mentions(
-                self.category_name
-            ),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="🌟 Personagem",
-            value=discord.utils.escape_mentions(
-                values["name"]
-            ),
-            inline=False,
-        )
-
-        embed.set_footer(
-            text="CONEXÃO • Etapa 2 de preenchimento"
-        )
-
-        view = ContinueRequestView(
-            self.category_name,
-            self.panel_channel,
-            values,
-        )
-
-        await interaction.response.send_message(
-            embed=embed,
-            view=view,
-            ephemeral=True,
+        await interaction.response.edit_message(
+            content="❌ Preenchimento cancelado.",
+            embed=None,
+            view=None,
         )
 
 
@@ -504,18 +596,25 @@ class CategorySelect(discord.ui.Select):
             options=options,
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction):
 
-        await interaction.response.send_modal(
-            SkinFirstModal(
-                self.values[0],
-                self.panel_channel,
-            )
+        category = self.values[0]
+
+        form_view = SkinFormView(
+            category,
+            self.panel_channel,
+            interaction,
+        )
+
+        await interaction.response.edit_message(
+            content=None,
+            embed=form_view.create_embed(),
+            view=form_view,
         )
 
 
 # =========================================================
-# TELA INICIAL DE PREENCHIMENTO
+# TELA INICIAL
 # =========================================================
 
 class RequestView(discord.ui.View):
@@ -560,8 +659,6 @@ class StaffActionsView(discord.ui.View):
 
     async def staff_check(self, interaction):
 
-        # Somente o dono do servidor pode usar os botões.
-
         if not is_server_owner(interaction):
 
             await interaction.response.send_message(
@@ -587,7 +684,6 @@ class StaffActionsView(discord.ui.View):
             return
 
         if not interaction.message.embeds:
-
             return await interaction.response.send_message(
                 "Não foi possível localizar a solicitação.",
                 ephemeral=True,
@@ -596,7 +692,6 @@ class StaffActionsView(discord.ui.View):
         request = get_request(interaction.message.id)
 
         if not request:
-
             return await interaction.response.send_message(
                 "⚠️ Registro deste pedido não encontrado.",
                 ephemeral=True,
@@ -604,35 +699,31 @@ class StaffActionsView(discord.ui.View):
 
         current_status = request.get("status", "pending")
 
-        if current_status in (
-            "approved",
-            "rejected",
-            "closed",
-        ):
-
+        if current_status in ("approved", "rejected", "closed"):
             return await interaction.response.send_message(
                 "⚠️ Esta solicitação já foi decidida ou encerrada.",
                 ephemeral=True,
             )
 
         embed = interaction.message.embeds[0]
-
         embed.color = color
-        embed.set_footer(
-            text=f"Status: {status}"
-        )
+        embed.set_footer(text=f"Status: {status}")
 
         if decision:
-
             update_request(
                 interaction.message.id,
                 status=decision,
             )
-
             view = StaffActionsView(decided=True)
 
-        else:
+        elif status == "Em análise":
+            update_request(
+                interaction.message.id,
+                status="analysis",
+            )
+            view = StaffActionsView()
 
+        else:
             view = StaffActionsView()
 
         await interaction.response.edit_message(
@@ -640,9 +731,7 @@ class StaffActionsView(discord.ui.View):
             view=view,
         )
 
-        # =================================================
-        # NOTIFICACAO POR DM
-        # =================================================
+        # Envia DM ao solicitante.
 
         if decision:
 
@@ -664,11 +753,10 @@ class StaffActionsView(discord.ui.View):
                             description=(
                                 "Sua solicitação de skin para o mapa "
                                 "**CONEXÃO • THEUSSYT** foi aprovada!\n\n"
-                                "🎉 **Sua sugestão foi aprovada pela equipe!**\n\n"
+                                "🎉 Sua sugestão foi aprovada pela equipe!\n\n"
                                 "Em breve, a skin poderá ser adicionada "
                                 "ao mapa.\n\n"
-                                "Agradecemos por participar e enviar "
-                                "sua sugestão!"
+                                "Agradecemos por participar!"
                             ),
                             color=0x2ECC71,
                         )
@@ -680,11 +768,10 @@ class StaffActionsView(discord.ui.View):
                             description=(
                                 "Infelizmente, sua sugestão de skin "
                                 "para o mapa **CONEXÃO • THEUSSYT** "
-                                "não foi aprovada pela equipe.\n\n"
+                                "não foi aprovada.\n\n"
                                 "Mas não desanime! Você pode enviar "
                                 "uma nova sugestão quando quiser.\n\n"
-                                "Agradecemos por participar e "
-                                "contribuir com o mapa!"
+                                "Agradecemos por participar!"
                             ),
                             color=0xE74C3C,
                         )
@@ -692,10 +779,7 @@ class StaffActionsView(discord.ui.View):
                     dm_embed.add_field(
                         name="🌟 Personagem",
                         value=discord.utils.escape_mentions(
-                            request.get(
-                                "character",
-                                "Não informado",
-                            )
+                            request.get("character", "Não informado")
                         ),
                         inline=False,
                     )
@@ -704,37 +788,32 @@ class StaffActionsView(discord.ui.View):
                         text="CONEXÃO • THEUSSYT"
                     )
 
-                    await requester.send(
-                        embed=dm_embed
-                    )
-
+                    await requester.send(embed=dm_embed)
                     dm_sent = True
 
                 except discord.Forbidden:
                     dm_sent = False
 
                 except Exception as erro:
-                    print(
-                        f"Erro enviando DM de skins: {erro}"
-                    )
+                    print(f"Erro enviando DM de skins: {erro}")
                     dm_sent = False
 
             if dm_sent:
-
-                await interaction.followup.send(
+                message = (
                     "✅ Solicitação atualizada e DM enviada "
-                    "ao solicitante!",
-                    ephemeral=True,
+                    "ao solicitante!"
                 )
-
             else:
-
-                await interaction.followup.send(
-                    "✅ Solicitação atualizada, mas não foi "
-                    "possível enviar a DM. O usuário pode "
-                    "estar com as mensagens privadas bloqueadas.",
-                    ephemeral=True,
+                message = (
+                    "✅ Solicitação atualizada, mas não consegui "
+                    "enviar a DM. O usuário pode estar com as "
+                    "mensagens privadas bloqueadas."
                 )
+
+            await interaction.followup.send(
+                message,
+                ephemeral=True,
+            )
 
         else:
 
@@ -799,7 +878,6 @@ class StaffActionsView(discord.ui.View):
             return
 
         if not interaction.message.embeds:
-
             return await interaction.response.send_message(
                 "Não foi possível localizar a solicitação.",
                 ephemeral=True,
@@ -811,12 +889,7 @@ class StaffActionsView(discord.ui.View):
 
             current_status = request.get("status", "pending")
 
-            if current_status in (
-                "approved",
-                "rejected",
-                "closed",
-            ):
-
+            if current_status in ("approved", "rejected", "closed"):
                 return await interaction.response.send_message(
                     "⚠️ Esta solicitação já foi decidida ou encerrada.",
                     ephemeral=True,
@@ -828,11 +901,8 @@ class StaffActionsView(discord.ui.View):
             )
 
         embed = interaction.message.embeds[0]
-
         embed.color = 0x808080
-        embed.set_footer(
-            text="Status: Encerrada"
-        )
+        embed.set_footer(text="Status: Encerrada")
 
         await interaction.response.edit_message(
             embed=embed,
@@ -862,7 +932,6 @@ class SkinPanelView(discord.ui.View):
             interaction.channel,
             discord.TextChannel,
         ):
-
             return await interaction.response.send_message(
                 "Este painel precisa estar em um canal de texto.",
                 ephemeral=True,
@@ -877,15 +946,11 @@ class SkinPanelView(discord.ui.View):
                 "━━━━━━━━━━━━━━━━━━\n"
                 "📋 **COMO FUNCIONA**\n\n"
                 "1️⃣ Escolha a categoria.\n"
-                "2️⃣ Informe os IDs das peças.\n"
-                "3️⃣ Finalize e envie sua sugestão.\n\n"
+                "2️⃣ Preencha cada peça pelos botões.\n"
+                "3️⃣ Confira os dados e envie sua sugestão.\n\n"
                 "━━━━━━━━━━━━━━━━━━\n"
                 "🌐 **CONSULTAR IDs**\n"
-                "[Clique aqui para encontrar os IDs]("
-                + SITE_IDS
-                + ")\n\n"
-                "Você também pode utilizar o botão "
-                "de consulta abaixo.\n\n"
+                f"[Clique aqui para encontrar os IDs]({SITE_IDS})\n\n"
                 "🔒 Os pedidos serão encaminhados "
                 "para análise da equipe."
             ),
@@ -917,13 +982,11 @@ async def painel_skins(
         return
 
     if ctx.author.id != ctx.guild.owner_id:
-
         return await ctx.send(
             "⛔ Somente o dono do servidor pode usar esse comando."
         )
 
     if canal is None:
-
         return await ctx.send(
             "❌ Você precisa mencionar um canal.\n"
             "Exemplo: `!painelskins #skins`"
@@ -939,7 +1002,7 @@ async def painel_skins(
                 "Utilize o botão abaixo para iniciar "
                 "sua solicitação.\n\n"
                 "🌟 Escolha a categoria\n"
-                "👕 Informe os IDs das peças\n"
+                "👕 Preencha os IDs das peças\n"
                 "📨 Envie para análise\n\n"
                 "Todas as sugestões serão encaminhadas "
                 "para o canal privado da equipe."
@@ -973,8 +1036,7 @@ async def painel_skins(
         print(f"Erro no comando painelskins: {erro}")
 
         await ctx.send(
-            "❌ Erro ao publicar o painel. "
-            "Confira o terminal."
+            "❌ Erro ao publicar o painel. Confira o terminal."
         )
 
 
