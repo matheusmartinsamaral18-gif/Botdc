@@ -56,7 +56,6 @@ def update_request(message_id, **changes):
 # =========================================================
 
 def is_server_owner(interaction):
-
     return (
         interaction.guild is not None
         and interaction.user.id == interaction.guild.owner_id
@@ -115,82 +114,93 @@ async def get_request_channel(guild, panel_channel):
 
 
 # =========================================================
-# CONFIGURACAO DOS CAMPOS
+# CAMPOS DO FORMULARIO
 # =========================================================
 
 FIELDS = {
     "name": {
-        "label": "Personagem / famoso",
-        "button": "🌟 Personagem",
-        "placeholder": "Ex: Naruto, Cristiano Ronaldo...",
-        "required": True,
+        "button": "✏️ Nome",
+        "placeholder": "Nome do famoso, personagem ou skin",
     },
     "head": {
-        "label": "ID da cabeça",
         "button": "🧑 Cabeça",
         "placeholder": "Digite o ID da cabeça",
-        "required": True,
     },
     "face": {
-        "label": "ID do rosto",
         "button": "👤 Rosto",
         "placeholder": "Digite o ID do rosto",
-        "required": True,
     },
     "mask": {
-        "label": "ID da máscara",
         "button": "🎭 Máscara",
         "placeholder": "Digite o ID da máscara",
-        "required": True,
     },
     "shirt": {
-        "label": "ID da camisa",
         "button": "👕 Camisa",
         "placeholder": "Digite o ID da camisa",
-        "required": True,
     },
     "pants": {
-        "label": "ID da calça / short",
         "button": "👖 Calça",
-        "placeholder": "Digite o ID da calça",
-        "required": True,
+        "placeholder": "Digite o ID da calça ou short",
     },
     "shoes": {
-        "label": "ID do tênis",
         "button": "👟 Tênis",
         "placeholder": "Digite o ID do tênis",
-        "required": True,
     },
     "weapon": {
-        "label": "ID da arma",
         "button": "🔫 Arma",
-        "placeholder": "Opcional: digite o ID da arma",
-        "required": False,
+        "placeholder": "Digite o ID da arma (opcional)",
     },
 }
 
 
+def get_name_label(category):
+
+    if category == "Skin normal":
+        return "Nome da skin"
+
+    if category == "Skin de arma":
+        return "Nome da arma / skin"
+
+    return "Nome do famoso / personagem"
+
+
+def get_name_placeholder(category):
+
+    if category == "Skin normal":
+        return "Digite o nome da skin ou o ID, se souber"
+
+    if category == "Skin de arma":
+        return "Digite o nome da arma ou da skin"
+
+    return "Digite o nome do famoso ou personagem"
+
+
 # =========================================================
-# MODAL DE UM CAMPO
+# MODAL DE CADA CAMPO
 # =========================================================
 
 class SkinFieldModal(discord.ui.Modal):
 
     def __init__(self, form_view, field_key):
 
-        config = FIELDS[field_key]
+        if field_key == "name":
+            label = get_name_label(form_view.category_name)
+            placeholder = get_name_placeholder(form_view.category_name)
+        else:
+            label = FIELDS[field_key]["button"]
+            placeholder = FIELDS[field_key]["placeholder"]
 
         super().__init__(
-            title=f"Preencher • {config['label']}"
+            title=f"Preencher • {label}"
         )
 
         self.form_view = form_view
         self.field_key = field_key
 
         self.value_input = discord.ui.TextInput(
-            label=config["label"],
-            placeholder=config["placeholder"],
-            required=config["required"],
+            label=label,
+            placeholder=placeholder,
+            required=False,
             max_length=100,
             default=form_view.values.get(field_key, ""),
         )
@@ -205,7 +215,6 @@ class SkinFieldModal(discord.ui.Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Atualiza o painel original com o campo preenchido.
         try:
             await self.form_view.panel_interaction.edit_original_response(
                 embed=self.form_view.create_embed(),
@@ -216,17 +225,23 @@ class SkinFieldModal(discord.ui.Modal):
 
 
 # =========================================================
-# BOTAO INDIVIDUAL DE PREENCHIMENTO
+# BOTAO INDIVIDUAL
 # =========================================================
 
 class SkinFieldButton(discord.ui.Button):
 
     def __init__(self, form_view, field_key, row):
 
-        config = FIELDS[field_key]
+        if field_key == "name":
+            label = get_name_label(form_view.category_name)
+            emoji = "✏️"
+        else:
+            label = FIELDS[field_key]["button"]
+            emoji = None
 
         super().__init__(
-            label=config["button"],
+            label=label,
+            emoji=emoji,
             style=discord.ButtonStyle.secondary,
             row=row,
         )
@@ -274,8 +289,6 @@ class SkinFormView(discord.ui.View):
             "weapon": "",
         }
 
-        # Cada peça possui seu próprio botão.
-
         field_rows = {
             "name": 0,
             "head": 0,
@@ -305,35 +318,16 @@ class SkinFormView(discord.ui.View):
     def create_embed(self):
 
         embed = discord.Embed(
-            title="📞 CRIAR SUA SKIN",
+            title="🎨 Montar sua skin",
             description=(
-                "**CONEXÃO • THEUSSYT**\n\n"
-                "Personalize sua skin antes de enviar.\n"
-                "Clique nos botões para preencher cada peça.\n\n"
-                "━━━━━━━━━━━━━━━━━━"
+                f"**{self.category_name}**\n"
+                "Clique nas peças que deseja preencher."
             ),
             color=0x2ECC71,
         )
 
-        embed.add_field(
-            name="📂 Categoria",
-            value=self.category_name,
-            inline=False,
-        )
-
-        field_emojis = {
-            "name": "🌟",
-            "head": "🧑",
-            "face": "👤",
-            "mask": "🎭",
-            "shirt": "👕",
-            "pants": "👖",
-            "shoes": "👟",
-            "weapon": "🔫",
-        }
-
         field_names = {
-            "name": "Personagem",
+            "name": get_name_label(self.category_name),
             "head": "Cabeça",
             "face": "Rosto",
             "mask": "Máscara",
@@ -343,51 +337,46 @@ class SkinFormView(discord.ui.View):
             "weapon": "Arma",
         }
 
+        emojis = {
+            "name": "✏️",
+            "head": "🧑",
+            "face": "👤",
+            "mask": "🎭",
+            "shirt": "👕",
+            "pants": "👖",
+            "shoes": "👟",
+            "weapon": "🔫",
+        }
+
+        filled = 0
+
         for key in FIELDS:
 
-            value = self.values.get(key, "")
+            value = self.values.get(key, "").strip()
 
-            if value:
-                display = discord.utils.escape_mentions(value)
-            elif key == "weapon":
-                display = "Não informado (opcional)"
-            else:
-                display = "Não preenchido"
+            if not value:
+                continue
+
+            filled += 1
 
             embed.add_field(
-                name=f"{field_emojis[key]} {field_names[key]}",
-                value=display,
+                name=f"{emojis[key]} {field_names[key]}",
+                value=discord.utils.escape_mentions(value),
                 inline=True,
             )
 
-        required_fields = [
-            key for key, config in FIELDS.items()
-            if config["required"]
-        ]
-
-        completed = sum(
-            1 for key in required_fields
-            if self.values.get(key)
-        )
-
-        embed.add_field(
-            name="📋 Progresso",
-            value=f"**{completed}/{len(required_fields)} campos obrigatórios preenchidos**",
-            inline=False,
-        )
+        if filled == 0:
+            embed.add_field(
+                name="📋 Peças",
+                value="Nenhuma peça preenchida ainda.",
+                inline=False,
+            )
 
         embed.set_footer(
-            text="Preencha os campos e depois clique em Enviar solicitação."
+            text="Preencha somente o que souber e envie quando terminar."
         )
 
         return embed
-
-    async def refresh(self):
-
-        await self.panel_interaction.edit_original_response(
-            embed=self.create_embed(),
-            view=self,
-        )
 
     @discord.ui.button(
         label="Enviar solicitação",
@@ -396,20 +385,6 @@ class SkinFormView(discord.ui.View):
         row=4,
     )
     async def submit_request(self, interaction, button):
-
-        missing = [
-            FIELDS[key]["label"]
-            for key, config in FIELDS.items()
-            if config["required"] and not self.values.get(key)
-        ]
-
-        if missing:
-
-            return await interaction.response.send_message(
-                "❌ **Ainda faltam alguns campos!**\n\n"
-                + "\n".join(f"• {field}" for field in missing),
-                ephemeral=True,
-            )
 
         await interaction.response.defer(ephemeral=True)
 
@@ -430,10 +405,7 @@ class SkinFormView(discord.ui.View):
 
             embed = discord.Embed(
                 title="📨 NOVA SOLICITAÇÃO DE SKIN",
-                description=(
-                    "Uma nova sugestão foi enviada "
-                    "para análise da equipe."
-                ),
+                description="Uma nova sugestão foi enviada para análise.",
                 color=0x2ECC71,
             )
 
@@ -452,24 +424,38 @@ class SkinFormView(discord.ui.View):
             )
 
             field_names = {
-                "name": "🌟 Famoso / personagem",
-                "head": "🧑 Cabeça",
-                "face": "👤 Rosto",
-                "mask": "🎭 Máscara",
-                "shirt": "👕 Camisa",
-                "pants": "👖 Calça / short",
-                "shoes": "👟 Tênis",
-                "weapon": "🔫 Arma",
+                "name": get_name_label(self.category_name),
+                "head": "Cabeça",
+                "face": "Rosto",
+                "mask": "Máscara",
+                "shirt": "Camisa",
+                "pants": "Calça / short",
+                "shoes": "Tênis",
+                "weapon": "Arma",
             }
 
-            for key, label in field_names.items():
+            emojis = {
+                "name": "✏️",
+                "head": "🧑",
+                "face": "👤",
+                "mask": "🎭",
+                "shirt": "👕",
+                "pants": "👖",
+                "shoes": "👟",
+                "weapon": "🔫",
+            }
 
-                value = self.values.get(key) or "Não informado"
+            for key in FIELDS:
+
+                value = self.values.get(key, "").strip()
+
+                if not value:
+                    continue
 
                 embed.add_field(
-                    name=label,
+                    name=f"{emojis[key]} {field_names[key]}",
                     value=discord.utils.escape_mentions(value),
-                    inline=key != "name",
+                    inline=True,
                 )
 
             embed.set_footer(
@@ -481,34 +467,22 @@ class SkinFormView(discord.ui.View):
                 view=StaffActionsView(),
             )
 
-            # Guarda o solicitante fora do Embed.
-
             data = load_requests()
 
             data[str(message.id)] = {
                 "requester_id": interaction.user.id,
                 "status": "pending",
                 "category": self.category_name,
-                "character": self.values["name"],
+                "character": self.values.get("name", ""),
             }
 
             save_requests(data)
 
-            # Finaliza o painel de preenchimento.
-
-            for item in self.children:
-                item.disabled = True
-
             await interaction.edit_original_response(
                 content="",
                 embed=discord.Embed(
-                    title="✅ SOLICITAÇÃO ENVIADA!",
-                    description=(
-                        "Sua sugestão foi encaminhada "
-                        "para análise da equipe.\n\n"
-                        "Obrigado por contribuir com o mapa "
-                        "**CONEXÃO • THEUSSYT**!"
-                    ),
+                    title="✅ Solicitação enviada!",
+                    description="Sua sugestão foi encaminhada para análise.",
                     color=0x2ECC71,
                 ),
                 view=None,
@@ -517,8 +491,8 @@ class SkinFormView(discord.ui.View):
         except discord.Forbidden:
 
             await interaction.followup.send(
-                "❌ Não tenho permissão para acessar "
-                "ou enviar mensagens no canal privado.",
+                "❌ Não tenho permissão para enviar mensagens "
+                "no canal privado.",
                 ephemeral=True,
             )
 
@@ -571,7 +545,7 @@ class CategorySelect(discord.ui.Select):
             ),
             discord.SelectOption(
                 label="Skin normal",
-                description="Skins comuns ou personalizadas",
+                description="Pode informar o nome da skin ou os IDs",
                 value="Skin normal",
                 emoji="👤",
             ),
@@ -598,10 +572,8 @@ class CategorySelect(discord.ui.Select):
 
     async def callback(self, interaction):
 
-        category = self.values[0]
-
         form_view = SkinFormView(
-            category,
+            self.values[0],
             self.panel_channel,
             interaction,
         )
@@ -662,8 +634,7 @@ class StaffActionsView(discord.ui.View):
         if not is_server_owner(interaction):
 
             await interaction.response.send_message(
-                "⛔ **Acesso negado!**\n\n"
-                "Somente o dono do servidor pode "
+                "⛔ Somente o dono do servidor pode "
                 "gerenciar as solicitações de skins.",
                 ephemeral=True,
             )
@@ -731,8 +702,6 @@ class StaffActionsView(discord.ui.View):
             view=view,
         )
 
-        # Envia DM ao solicitante.
-
         if decision:
 
             requester_id = request.get("requester_id")
@@ -751,12 +720,11 @@ class StaffActionsView(discord.ui.View):
                         dm_embed = discord.Embed(
                             title="✅ SOLICITAÇÃO APROVADA!",
                             description=(
-                                "Sua solicitação de skin para o mapa "
+                                "Sua solicitação para o mapa "
                                 "**CONEXÃO • THEUSSYT** foi aprovada!\n\n"
-                                "🎉 Sua sugestão foi aprovada pela equipe!\n\n"
-                                "Em breve, a skin poderá ser adicionada "
-                                "ao mapa.\n\n"
-                                "Agradecemos por participar!"
+                                "Em breve, sua sugestão poderá ser "
+                                "adicionada ao mapa.\n\n"
+                                "Obrigado por participar!"
                             ),
                             color=0x2ECC71,
                         )
@@ -766,23 +734,22 @@ class StaffActionsView(discord.ui.View):
                         dm_embed = discord.Embed(
                             title="❌ SOLICITAÇÃO RECUSADA",
                             description=(
-                                "Infelizmente, sua sugestão de skin "
-                                "para o mapa **CONEXÃO • THEUSSYT** "
-                                "não foi aprovada.\n\n"
-                                "Mas não desanime! Você pode enviar "
-                                "uma nova sugestão quando quiser.\n\n"
-                                "Agradecemos por participar!"
+                                "Sua sugestão não foi aprovada desta vez.\n\n"
+                                "Você pode enviar uma nova sugestão "
+                                "quando quiser!\n\n"
+                                "Obrigado por participar."
                             ),
                             color=0xE74C3C,
                         )
 
-                    dm_embed.add_field(
-                        name="🌟 Personagem",
-                        value=discord.utils.escape_mentions(
-                            request.get("character", "Não informado")
-                        ),
-                        inline=False,
-                    )
+                    character = request.get("character", "")
+
+                    if character:
+                        dm_embed.add_field(
+                            name="✏️ Nome informado",
+                            value=discord.utils.escape_mentions(character),
+                            inline=False,
+                        )
 
                     dm_embed.set_footer(
                         text="CONEXÃO • THEUSSYT"
@@ -799,10 +766,7 @@ class StaffActionsView(discord.ui.View):
                     dm_sent = False
 
             if dm_sent:
-                message = (
-                    "✅ Solicitação atualizada e DM enviada "
-                    "ao solicitante!"
-                )
+                message = "✅ Solicitação atualizada e DM enviada!"
             else:
                 message = (
                     "✅ Solicitação atualizada, mas não consegui "
@@ -917,7 +881,6 @@ class StaffActionsView(discord.ui.View):
 class SkinPanelView(discord.ui.View):
 
     def __init__(self):
-
         super().__init__(timeout=None)
 
     @discord.ui.button(
@@ -940,25 +903,19 @@ class SkinPanelView(discord.ui.View):
         embed = discord.Embed(
             title="🎨 CENTRAL DE SOLICITAÇÕES",
             description=(
-                "### CONEXÃO • THEUSSYT\n\n"
-                "Crie sua sugestão de skin para o mapa "
-                "de maneira organizada.\n\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "📋 **COMO FUNCIONA**\n\n"
+                "**CONEXÃO • THEUSSYT**\n\n"
+                "Sugira uma skin para o nosso mapa!\n\n"
                 "1️⃣ Escolha a categoria.\n"
-                "2️⃣ Preencha cada peça pelos botões.\n"
-                "3️⃣ Confira os dados e envie sua sugestão.\n\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "🌐 **CONSULTAR IDs**\n"
-                f"[Clique aqui para encontrar os IDs]({SITE_IDS})\n\n"
-                "🔒 Os pedidos serão encaminhados "
-                "para análise da equipe."
+                "2️⃣ Preencha o que souber.\n"
+                "3️⃣ Envie sua sugestão.\n\n"
+                "Você pode informar o nome da skin "
+                "ou os IDs das peças."
             ),
             color=0x2ECC71,
         )
 
         embed.set_footer(
-            text="Sistema de sugestões • CONEXÃO"
+            text="Central de solicitações • CONEXÃO"
         )
 
         await interaction.response.send_message(
@@ -997,15 +954,12 @@ async def painel_skins(
         embed = discord.Embed(
             title="🎨 PAINEL DE SKINS",
             description=(
-                "### CONEXÃO • THEUSSYT\n\n"
-                "Deseja sugerir uma skin para o nosso mapa?\n\n"
-                "Utilize o botão abaixo para iniciar "
-                "sua solicitação.\n\n"
-                "🌟 Escolha a categoria\n"
-                "👕 Preencha os IDs das peças\n"
-                "📨 Envie para análise\n\n"
-                "Todas as sugestões serão encaminhadas "
-                "para o canal privado da equipe."
+                "**CONEXÃO • THEUSSYT**\n\n"
+                "Quer sugerir uma skin para o mapa?\n\n"
+                "Clique abaixo, escolha a categoria "
+                "e preencha o que souber.\n\n"
+                "Você pode informar o nome da skin "
+                "ou os IDs das peças."
             ),
             color=0x2ECC71,
         )
