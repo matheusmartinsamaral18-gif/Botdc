@@ -70,4 +70,5 @@ raise RuntimeError(
 "A variável de ambiente TOKEN não foi configurada."
 )
 
+
 bot.run(TOKEN)
