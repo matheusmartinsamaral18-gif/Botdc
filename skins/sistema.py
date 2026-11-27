@@ -54,7 +54,7 @@ def update_request(message_id, **changes):
 
 
 # =========================================================
-# PERMISSAO: SOMENTE DONO DO SERVIDOR
+# SOMENTE O DONO DO SERVIDOR
 # =========================================================
 
 def is_server_owner(interaction):
@@ -111,12 +111,12 @@ async def get_request_channel(guild, panel_channel):
         category=panel_channel.category,
         overwrites=overwrites,
         topic="Solicitações de skins • CONEXÃO THEUSSYT",
-        reason="Criacao do canal de solicitacoes",
+        reason="Criação do canal de solicitações",
     )
 
 
 # =========================================================
-# CONFIGURACAO DAS CATEGORIAS
+# CAMPOS DAS SKINS
 # =========================================================
 
 SKIN_FIELDS = {
@@ -130,7 +130,6 @@ SKIN_FIELDS = {
 
 
 def category_name_label(category):
-
     labels = {
         "Skin de famoso": "Nome do famoso",
         "Skin de anime": "Nome do anime / personagem",
@@ -142,7 +141,6 @@ def category_name_label(category):
 
 
 def category_name_placeholder(category):
-
     placeholders = {
         "Skin de famoso": "Ex: Cristiano Ronaldo",
         "Skin de anime": "Ex: Naruto, Goku, Luffy...",
@@ -203,7 +201,7 @@ class SkinFieldModal(discord.ui.Modal):
 
 
 # =========================================================
-# BOTAO DE CAMPO
+# BOTÃO DE CAMPO
 # =========================================================
 
 class SkinFieldButton(discord.ui.Button):
@@ -230,15 +228,12 @@ class SkinFieldButton(discord.ui.Button):
     async def callback(self, interaction):
 
         await interaction.response.send_modal(
-            SkinFieldModal(
-                self.form,
-                self.field_key,
-            )
+            SkinFieldModal(self.form, self.field_key)
         )
 
 
 # =========================================================
-# MODAL PARA ADICIONAR ARMA
+# ADICIONAR ARMAS
 # =========================================================
 
 class AddWeaponModal(discord.ui.Modal):
@@ -273,13 +268,13 @@ class AddWeaponModal(discord.ui.Modal):
 
         if not name and not weapon_id:
             return await interaction.response.send_message(
-                "Informe pelo menos o nome ou o ID desta arma.",
+                "Informe pelo menos o nome ou o ID da arma.",
                 ephemeral=True,
             )
 
         if len(self.form.weapons) >= MAX_WEAPONS:
             return await interaction.response.send_message(
-                f"Você atingiu o limite de {MAX_WEAPONS} armas.",
+                f"Limite de {MAX_WEAPONS} armas atingido.",
                 ephemeral=True,
             )
 
@@ -299,10 +294,6 @@ class AddWeaponModal(discord.ui.Modal):
             print(f"Erro adicionando arma: {erro}")
 
 
-# =========================================================
-# BOTAO ADICIONAR ARMA
-# =========================================================
-
 class AddWeaponButton(discord.ui.Button):
 
     def __init__(self, form):
@@ -311,7 +302,7 @@ class AddWeaponButton(discord.ui.Button):
             label="Adicionar outra arma",
             emoji="➕",
             style=discord.ButtonStyle.primary,
-            row=1,
+            row=0,
         )
 
         self.form = form
@@ -330,7 +321,7 @@ class AddWeaponButton(discord.ui.Button):
 
 
 # =========================================================
-# FORMULARIO PRINCIPAL
+# FORMULÁRIO PRINCIPAL
 # =========================================================
 
 class SkinFormView(discord.ui.View):
@@ -355,26 +346,38 @@ class SkinFormView(discord.ui.View):
 
         self.weapons = []
 
-        # Categoria de armas: somente armas.
+        # Botão de link criado diretamente.
+        # Não usar @discord.ui.button com url.
+
+        self.add_item(
+            discord.ui.Button(
+                label="Consultar IDs",
+                emoji="🌐",
+                style=discord.ButtonStyle.link,
+                url=SITE_IDS,
+                row=3,
+            )
+        )
+
         if category == "Skin de arma":
 
-            self.add_item(
-                AddWeaponButton(self)
-            )
+            self.add_item(AddWeaponButton(self))
 
         else:
 
+            # Distribui os campos em linhas válidas.
             self.add_item(
                 SkinFieldButton(self, "name", 0)
             )
 
-            row = 1
+            field_keys = list(SKIN_FIELDS.keys())
 
-            for key in SKIN_FIELDS:
+            for index, key in enumerate(field_keys):
+                row = 0 if index < 4 else 1
+
                 self.add_item(
                     SkinFieldButton(self, key, row)
                 )
-                row += 1
 
     def create_embed(self):
 
@@ -382,8 +385,8 @@ class SkinFormView(discord.ui.View):
             title="🎨 Montar solicitação",
             description=(
                 f"**Categoria:** {self.category}\n\n"
-                "Clique nos botões para preencher. "
-                "Você não precisa preencher tudo."
+                "Clique nos botões para preencher.\n"
+                "Preencha somente o que souber."
             ),
             color=0x2ECC71,
         )
@@ -415,7 +418,7 @@ class SkinFormView(discord.ui.View):
 
             if self.values["name"]:
                 embed.add_field(
-                    name=f"✏️ {category_name_label(self.category)}",
+                    name=category_name_label(self.category),
                     value=discord.utils.escape_mentions(
                         self.values["name"]
                     ),
@@ -447,16 +450,6 @@ class SkinFormView(discord.ui.View):
         return embed
 
     @discord.ui.button(
-        label="Consultar IDs",
-        emoji="🌐",
-        style=discord.ButtonStyle.link,
-        url=SITE_IDS,
-        row=4,
-    )
-    async def site(self, interaction, button):
-        pass
-
-    @discord.ui.button(
         label="Enviar solicitação",
         emoji="✅",
         style=discord.ButtonStyle.success,
@@ -476,6 +469,20 @@ class SkinFormView(discord.ui.View):
                     ephemeral=True,
                 )
 
+            # Não envia uma solicitação totalmente vazia.
+            if self.category == "Skin de arma":
+                if not self.weapons:
+                    return await interaction.followup.send(
+                        "Adicione pelo menos uma arma antes de enviar.",
+                        ephemeral=True,
+                    )
+            else:
+                if not any(self.values.values()):
+                    return await interaction.followup.send(
+                        "Preencha pelo menos um campo antes de enviar.",
+                        ephemeral=True,
+                    )
+
             destination = await get_request_channel(
                 guild,
                 self.panel_channel,
@@ -483,7 +490,7 @@ class SkinFormView(discord.ui.View):
 
             embed = discord.Embed(
                 title="📨 NOVA SOLICITAÇÃO • THEUSSYT",
-                description="Uma nova sugestão foi enviada para análise.",
+                description="Uma nova sugestão foi enviada.",
                 color=0x2ECC71,
             )
 
@@ -495,9 +502,11 @@ class SkinFormView(discord.ui.View):
 
             embed.add_field(
                 name="📂 Categoria",
-                value=self.category,
+                value=discord.utils.escape_mentions(self.category),
                 inline=False,
             )
+
+            character = ""
 
             if self.category == "Skin de arma":
 
@@ -515,14 +524,20 @@ class SkinFormView(discord.ui.View):
                         inline=False,
                     )
 
+                character = ", ".join(
+                    weapon["name"]
+                    for weapon in self.weapons
+                    if weapon["name"]
+                )
+
             else:
 
-                if self.values["name"]:
+                character = self.values.get("name", "")
+
+                if character:
                     embed.add_field(
                         name=category_name_label(self.category),
-                        value=discord.utils.escape_mentions(
-                            self.values["name"]
-                        ),
+                        value=discord.utils.escape_mentions(character),
                         inline=False,
                     )
 
@@ -552,7 +567,7 @@ class SkinFormView(discord.ui.View):
                 "requester_id": interaction.user.id,
                 "status": "pending",
                 "category": self.category,
-                "character": self.values.get("name", ""),
+                "character": character,
             }
 
             save_requests(data)
@@ -572,7 +587,7 @@ class SkinFormView(discord.ui.View):
 
         except Exception as erro:
 
-            print(f"Erro enviando solicitacao: {erro}")
+            print(f"Erro enviando solicitação: {erro}")
 
             await interaction.followup.send(
                 "❌ Ocorreu um erro ao enviar o pedido.",
@@ -595,39 +610,7 @@ class SkinFormView(discord.ui.View):
 
 
 # =========================================================
-# MODAL DE RECUSA COM MOTIVO
-# =========================================================
-
-class RejectReasonModal(discord.ui.Modal):
-
-    def __init__(self, message):
-
-        super().__init__(title="Motivo da recusa")
-
-        self.request_message = message
-
-        self.reason = discord.ui.TextInput(
-            label="Por que a solicitação foi recusada?",
-            placeholder="Escreva o motivo para a pessoa entender...",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=500,
-        )
-
-        self.add_item(self.reason)
-
-    async def on_submit(self, interaction):
-
-        await finish_decision(
-            interaction,
-            self.request_message,
-            decision="rejected",
-            reason=self.reason.value.strip(),
-        )
-
-
-# =========================================================
-# FINALIZAR APROVACAO / RECUSA
+# FINALIZAR APROVAÇÃO / RECUSA
 # =========================================================
 
 async def finish_decision(
@@ -657,7 +640,7 @@ async def finish_decision(
         "closed",
     ):
         return await interaction.response.send_message(
-            "⚠️ Esta solicitação já foi decidida ou encerrada.",
+            "⚠️ Esta solicitação já foi finalizada.",
             ephemeral=True,
         )
 
@@ -674,7 +657,8 @@ async def finish_decision(
         reason=reason,
     )
 
-    await interaction.response.edit_message(
+    # Edita a mensagem original, inclusive quando veio de um modal.
+    await message.edit(
         embed=embed,
         view=StaffActionsView(decided=True),
     )
@@ -707,7 +691,7 @@ async def finish_decision(
                 description=(
                     "Sua sugestão para o mapa "
                     "**CONEXÃO • THEUSSYT** não foi aprovada.\n\n"
-                    "**Motivo da recusa:**\n"
+                    "**Motivo:**\n"
                     f"{discord.utils.escape_mentions(reason or 'Não informado')}\n\n"
                     "Você pode enviar outra sugestão quando quiser."
                 ),
@@ -745,14 +729,46 @@ async def finish_decision(
             "A pessoa pode estar com as mensagens privadas bloqueadas."
         )
 
-    await interaction.followup.send(
+    await interaction.response.send_message(
         message_text,
         ephemeral=True,
     )
 
 
 # =========================================================
-# BOTOES DE GERENCIAMENTO
+# MODAL DE RECUSA COM MOTIVO
+# =========================================================
+
+class RejectReasonModal(discord.ui.Modal):
+
+    def __init__(self, message):
+
+        super().__init__(title="Motivo da recusa")
+
+        self.request_message = message
+
+        self.reason = discord.ui.TextInput(
+            label="Motivo da recusa",
+            placeholder="Explique brevemente o motivo...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500,
+        )
+
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction):
+
+        await finish_decision(
+            interaction,
+            self.request_message,
+            decision="rejected",
+            reason=self.reason.value.strip(),
+        )
+
+
+# =========================================================
+# BOTÕES DE GERENCIAMENTO
 # =========================================================
 
 class StaffActionsView(discord.ui.View):
@@ -907,7 +923,7 @@ class StaffActionsView(discord.ui.View):
 
 
 # =========================================================
-# SELECAO DE CATEGORIA
+# SELEÇÃO DE CATEGORIA
 # =========================================================
 
 class CategorySelect(discord.ui.Select):
@@ -982,9 +998,7 @@ class RequestView(discord.ui.View):
 
         super().__init__(timeout=180)
 
-        self.add_item(
-            CategorySelect(panel_channel)
-        )
+        self.add_item(CategorySelect(panel_channel))
 
         self.add_item(
             discord.ui.Button(
@@ -997,7 +1011,7 @@ class RequestView(discord.ui.View):
 
 
 # =========================================================
-# PAINEL PUBLICO
+# PAINEL PÚBLICO
 # =========================================================
 
 class SkinPanelView(discord.ui.View):
