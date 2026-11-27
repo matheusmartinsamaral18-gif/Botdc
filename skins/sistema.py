@@ -34,7 +34,6 @@ async def get_request_channel(guild, panel_channel):
         )
     }
 
-    # Permite acesso aos cargos da equipe com permissões administrativas.
     for role in guild.roles:
         if (
             role.permissions.administrator
@@ -69,9 +68,7 @@ async def get_request_channel(guild, panel_channel):
 class SkinSecondModal(discord.ui.Modal):
 
     def __init__(self, category_name, panel_channel, first_values):
-        super().__init__(
-            title="🎨 Finalizar solicitação"
-        )
+        super().__init__(title="Finalizar solicitação")
 
         self.category_name = category_name
         self.panel_channel = panel_channel
@@ -151,9 +148,7 @@ class SkinSecondModal(discord.ui.Modal):
 
             embed.add_field(
                 name="🌟 Nome do famoso / personagem",
-                value=discord.utils.escape_mentions(
-                    v["name"]
-                ),
+                value=discord.utils.escape_mentions(v["name"]),
                 inline=False,
             )
 
@@ -183,26 +178,20 @@ class SkinSecondModal(discord.ui.Modal):
 
             embed.add_field(
                 name="👖 Calça / Short",
-                value=discord.utils.escape_mentions(
-                    self.pants.value
-                ),
+                value=discord.utils.escape_mentions(self.pants.value),
                 inline=True,
             )
 
             embed.add_field(
                 name="👟 Tênis",
-                value=discord.utils.escape_mentions(
-                    self.shoes.value
-                ),
+                value=discord.utils.escape_mentions(self.shoes.value),
                 inline=True,
             )
 
             embed.add_field(
                 name="🔫 Arma",
                 value=(
-                    discord.utils.escape_mentions(
-                        self.weapon.value
-                    )
+                    discord.utils.escape_mentions(self.weapon.value)
                     if self.weapon.value
                     else "Não informado"
                 ),
@@ -219,7 +208,7 @@ class SkinSecondModal(discord.ui.Modal):
             )
 
             await interaction.response.send_message(
-                "✅ **Solicitação enviada!**\n"
+                "✅ **Solicitação enviada com sucesso!**\n"
                 "Sua sugestão foi encaminhada para a equipe.",
                 ephemeral=True,
             )
@@ -241,12 +230,35 @@ class SkinSecondModal(discord.ui.Modal):
                 )
 
 
+class ContinueRequestView(discord.ui.View):
+
+    def __init__(self, category_name, panel_channel, values):
+        super().__init__(timeout=300)
+
+        self.category_name = category_name
+        self.panel_channel = panel_channel
+        self.values = values
+
+    @discord.ui.button(
+        label="Continuar preenchimento",
+        emoji="➡️",
+        style=discord.ButtonStyle.success,
+    )
+    async def continue_form(self, interaction, button):
+
+        await interaction.response.send_modal(
+            SkinSecondModal(
+                self.category_name,
+                self.panel_channel,
+                self.values,
+            )
+        )
+
+
 class SkinFirstModal(discord.ui.Modal):
 
     def __init__(self, category_name, panel_channel):
-        super().__init__(
-            title="🎨 Solicitar skin • Etapa 1"
-        )
+        super().__init__(title="Solicitar skin • Etapa 1")
 
         self.category_name = category_name
         self.panel_channel = panel_channel
@@ -302,12 +314,34 @@ class SkinFirstModal(discord.ui.Modal):
             "shirt": self.shirt.value,
         }
 
-        await interaction.response.send_modal(
-            SkinSecondModal(
+        embed = discord.Embed(
+            title="📝 Etapa 1 concluída!",
+            description=(
+                "Os primeiros dados foram preenchidos.\n\n"
+                "Clique no botão abaixo para continuar "
+                "e informar a calça, o tênis e a arma opcional."
+            ),
+            color=0x2ECC71,
+        )
+
+        embed.add_field(
+            name="📂 Categoria",
+            value=self.category_name,
+            inline=False,
+        )
+
+        embed.set_footer(
+            text="Etapa 2 • Finalização"
+        )
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=ContinueRequestView(
                 self.category_name,
                 self.panel_channel,
                 values,
-            )
+            ),
+            ephemeral=True,
         )
 
 
@@ -374,14 +408,14 @@ class RequestView(discord.ui.View):
 
         self.add_item(CategorySelect(panel_channel))
 
-    @discord.ui.button(
-        label="Consultar IDs das skins",
-        emoji="🌐",
-        style=discord.ButtonStyle.link,
-        url=SITE_IDS,
-    )
-    async def site(self, interaction, button):
-        pass
+        self.add_item(
+            discord.ui.Button(
+                label="Consultar IDs das skins",
+                emoji="🌐",
+                style=discord.ButtonStyle.link,
+                url=SITE_IDS,
+            )
+        )
 
 
 class StaffActionsView(discord.ui.View):
@@ -521,8 +555,8 @@ class SkinPanelView(discord.ui.View):
                 "━━━━━━━━━━━━━━━━━━\n"
                 "🌐 **CONSULTAR IDs**\n"
                 f"[Clique aqui para encontrar os IDs]({SITE_IDS})\n\n"
-                "Você pode abrir o site, consultar as peças "
-                "e retornar ao Discord para continuar.\n"
+                "Você também pode usar o botão abaixo "
+                "para abrir o site.\n"
                 "━━━━━━━━━━━━━━━━━━\n\n"
                 "📋 **Como funciona?**\n"
                 "• Escolha a categoria.\n"
@@ -538,48 +572,77 @@ class SkinPanelView(discord.ui.View):
             text="CONEXÃO • Sistema de sugestões de skins"
         )
 
+        view = RequestView(interaction.channel)
+
         await interaction.response.send_message(
             embed=embed,
-            view=RequestView(interaction.channel),
+            view=view,
             ephemeral=True,
         )
 
 
 @bot.command(name="painelskins")
-async def painel_skins(ctx, canal: discord.TextChannel):
+async def painel_skins(ctx, canal: discord.TextChannel = None):
 
-    if ctx.guild is None or ctx.author.id != ctx.guild.owner_id:
+    if ctx.guild is None:
         return
 
-    embed = discord.Embed(
-        title="🎨 PAINEL DE SKINS",
-        description=(
-            "### CONEXÃO • THEUSSYT\n\n"
-            "Quer sugerir uma skin para o nosso mapa?\n\n"
-            "Utilize o botão abaixo para enviar sua sugestão "
-            "de forma organizada.\n\n"
-            "🌟 **Escolha a categoria**\n"
-            "👕 **Informe os IDs das peças**\n"
-            "📨 **Envie para análise da equipe**\n\n"
-            "Todas as solicitações serão encaminhadas "
-            "para um canal privado da equipe."
-        ),
-        color=0x2ECC71,
-    )
+    if ctx.author.id != ctx.guild.owner_id:
+        return await ctx.send(
+            "⛔ Somente o dono do servidor pode usar esse comando."
+        )
 
-    embed.set_footer(
-        text="CONEXÃO • Central de solicitações"
-    )
+    if canal is None:
+        return await ctx.send(
+            "❌ Você precisa mencionar um canal.\n"
+            "Exemplo: `!painelskins #skins`"
+        )
 
-    await canal.send(
-        embed=embed,
-        view=SkinPanelView(),
-    )
+    try:
 
-    await ctx.send(
-        f"✅ Painel publicado em {canal.mention}.",
-        delete_after=5,
-    )
+        embed = discord.Embed(
+            title="🎨 PAINEL DE SKINS",
+            description=(
+                "### CONEXÃO • THEUSSYT\n\n"
+                "Quer sugerir uma skin para o nosso mapa?\n\n"
+                "Utilize o botão abaixo para enviar sua sugestão "
+                "de forma organizada.\n\n"
+                "🌟 **Escolha a categoria**\n"
+                "👕 **Informe os IDs das peças**\n"
+                "📨 **Envie para análise da equipe**\n\n"
+                "Todas as solicitações serão encaminhadas "
+                "para um canal privado da equipe."
+            ),
+            color=0x2ECC71,
+        )
+
+        embed.set_footer(
+            text="CONEXÃO • Central de solicitações"
+        )
+
+        await canal.send(
+            embed=embed,
+            view=SkinPanelView(),
+        )
+
+        await ctx.send(
+            f"✅ Painel publicado em {canal.mention}!",
+            delete_after=5,
+        )
+
+    except discord.Forbidden:
+        await ctx.send(
+            "❌ Não tenho permissão para enviar mensagens "
+            "ou embeds nesse canal."
+        )
+
+    except Exception as erro:
+        print(f"Erro no comando painelskins: {erro}")
+
+        await ctx.send(
+            "❌ Ocorreu um erro ao publicar o painel. "
+            "Confira o terminal."
+        )
 
 
 async def setup(bot):
