@@ -1,6 +1,6 @@
 """
 ARQUIVO PRINCIPAL — só liga o bot e carrega os módulos.
-Para desativar um sistema inteiro, comente a linha dele em EXTENSOES.
+Para desativar um sistema inteiro, comente a linha dele em EXTENSO.
 """
 import os
 import traceback
