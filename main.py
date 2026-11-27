@@ -47,14 +47,13 @@ EXTENSOES = [
 
 @bot.event
 async def setup_hook():
-    for extensao in EXTENSOES:
-        try:
-            await bot.load_extension(extensao)
-            print(f"📦 Módulo carregado: {extensao}")
-        except Exception as erro:
-            print(f"❌ Erro carregando 
-{extensao}: {erro}")
-             traceback.print_exc()
+for extensao in EXTENSOES:
+try:
+await bot.load_extension(extensao)
+print(f"📦 Módulo carregado: {extensao}")
+except Exception as erro:
+print(f"❌ Erro carregando {extensao}: {erro}")
+traceback.print_exc()
 
 @bot.event
 async def on_ready():
