@@ -152,6 +152,41 @@ def category_name_placeholder(category):
 
 
 # =========================================================
+# ATUALIZAR FORMULÁRIO
+# =========================================================
+
+async def refresh_form(form):
+    """
+    Atualiza a mensagem do formulário depois de uma resposta
+    de modal, sem depender da mensagem da interação do modal.
+    """
+
+    try:
+        if form.message is None:
+            print("Mensagem do formulário não encontrada.")
+            return False
+
+        await form.message.edit(
+            embed=form.create_embed(),
+            view=form,
+        )
+
+        return True
+
+    except discord.NotFound:
+        print("A mensagem do formulário não existe mais.")
+        return False
+
+    except discord.HTTPException as erro:
+        print(f"Erro atualizando formulário: {erro}")
+        return False
+
+    except Exception as erro:
+        print(f"Erro inesperado atualizando formulário: {erro}")
+        return False
+
+
+# =========================================================
 # MODAL DE CAMPO INDIVIDUAL
 # =========================================================
 
@@ -186,16 +221,16 @@ class SkinFieldModal(discord.ui.Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            await self.form.message.edit(
-                embed=self.form.create_embed(),
-                view=self.form,
-            )
-        except Exception as erro:
-            print(f"Erro atualizando formulário: {erro}")
+        updated = await refresh_form(self.form)
 
+        if updated:
             await interaction.followup.send(
-                "Não consegui atualizar o formulário.",
+                "✅ Campo atualizado!",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "⚠️ Não consegui atualizar o formulário.",
                 ephemeral=True,
             )
 
@@ -278,28 +313,46 @@ class AddWeaponModal(discord.ui.Modal):
                 ephemeral=True,
             )
 
+        # Adiciona a arma à lista do formulário.
         self.form.weapons.append({
             "name": name,
             "id": weapon_id,
         })
 
+        # Atualiza o texto do botão.
+        self.form.update_weapon_button()
+
         await interaction.response.defer(ephemeral=True)
 
-        try:
-            await self.form.message.edit(
-                embed=self.form.create_embed(),
-                view=self.form,
+        # Atualiza a mensagem original com a nova arma.
+        updated = await refresh_form(self.form)
+
+        if updated:
+            await interaction.followup.send(
+                f"✅ Arma adicionada! "
+                f"({len(self.form.weapons)}/{MAX_WEAPONS})",
+                ephemeral=True,
             )
-        except Exception as erro:
-            print(f"Erro adicionando arma: {erro}")
+        else:
+            await interaction.followup.send(
+                "⚠️ A arma foi registrada, mas não consegui atualizar "
+                "a mensagem do formulário.",
+                ephemeral=True,
+            )
 
 
 class AddWeaponButton(discord.ui.Button):
 
     def __init__(self, form):
 
+        label = (
+            "Adicionar outra arma"
+            if form.weapons
+            else "Adicionar arma"
+        )
+
         super().__init__(
-            label="Adicionar outra arma",
+            label=label,
             emoji="➕",
             style=discord.ButtonStyle.primary,
             row=0,
@@ -346,9 +399,7 @@ class SkinFormView(discord.ui.View):
 
         self.weapons = []
 
-        # Botão de link criado diretamente.
-        # Não usar @discord.ui.button com url.
-
+        # Botão de consulta.
         self.add_item(
             discord.ui.Button(
                 label="Consultar IDs",
@@ -361,11 +412,14 @@ class SkinFormView(discord.ui.View):
 
         if category == "Skin de arma":
 
-            self.add_item(AddWeaponButton(self))
+            # Começa como "Adicionar arma".
+            self.weapon_button = AddWeaponButton(self)
+            self.add_item(self.weapon_button)
 
         else:
 
-            # Distribui os campos em linhas válidas.
+            self.weapon_button = None
+
             self.add_item(
                 SkinFieldButton(self, "name", 0)
             )
@@ -378,6 +432,25 @@ class SkinFormView(discord.ui.View):
                 self.add_item(
                     SkinFieldButton(self, key, row)
                 )
+
+    def update_weapon_button(self):
+        """
+        Muda o botão depois que a primeira arma é adicionada.
+        """
+
+        if self.weapon_button is None:
+            return
+
+        if self.weapons:
+            self.weapon_button.label = "Adicionar outra arma"
+        else:
+            self.weapon_button.label = "Adicionar arma"
+
+        if len(self.weapons) >= MAX_WEAPONS:
+            self.weapon_button.disabled = True
+            self.weapon_button.label = "Limite de armas atingido"
+        else:
+            self.weapon_button.disabled = False
 
     def create_embed(self):
 
@@ -393,12 +466,15 @@ class SkinFormView(discord.ui.View):
 
         if self.category == "Skin de arma":
 
-            if not self.weapons:
-                embed.add_field(
-                    name="🔫 Armas",
-                    value="Nenhuma arma adicionada ainda.",
-                    inline=False,
-                )
+            embed.add_field(
+                name=f"🔫 Armas adicionadas ({len(self.weapons)}/{MAX_WEAPONS})",
+                value=(
+                    "Nenhuma arma adicionada ainda."
+                    if not self.weapons
+                    else "Confira abaixo as armas que você adicionou."
+                ),
+                inline=False,
+            )
 
             for index, weapon in enumerate(self.weapons, start=1):
 
@@ -471,12 +547,15 @@ class SkinFormView(discord.ui.View):
 
             # Não envia uma solicitação totalmente vazia.
             if self.category == "Skin de arma":
+
                 if not self.weapons:
                     return await interaction.followup.send(
                         "Adicione pelo menos uma arma antes de enviar.",
                         ephemeral=True,
                     )
+
             else:
+
                 if not any(self.values.values()):
                     return await interaction.followup.send(
                         "Preencha pelo menos um campo antes de enviar.",
@@ -657,7 +736,6 @@ async def finish_decision(
         reason=reason,
     )
 
-    # Edita a mensagem original, inclusive quando veio de um modal.
     await message.edit(
         embed=embed,
         view=StaffActionsView(decided=True),
@@ -979,13 +1057,18 @@ class CategorySelect(discord.ui.Select):
             self.panel_channel,
         )
 
-        form.message = interaction.message
-
         await interaction.response.edit_message(
             content=None,
             embed=form.create_embed(),
             view=form,
         )
+
+        # Guarda a mensagem efetivamente editada.
+        # Assim os modais conseguem atualizar o mesmo formulário.
+        try:
+            form.message = await interaction.original_response()
+        except Exception as erro:
+            print(f"Erro obtendo mensagem do formulário: {erro}")
 
 
 # =========================================================
