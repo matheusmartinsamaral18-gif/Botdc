@@ -1,8 +1,4 @@
-"""
-ARQUIVO PRINCIPAL — só liga o bot e carrega os módulos.
-"""
 import os
-import traceback
 import discord
 from config import bot
 
@@ -23,20 +19,13 @@ EXTENSOES = [
 "geral.limpar",
 "calls.sistema",
 "skins.sistema",
-"painel.painel_dono",
+"painel.painel_painel_dono",
 ]
 
 @bot.event
-async def setup_hook(): await carregar_extensoes()
+async def setup_hook(): await carregar()
 
-async def carregar_extensoes():
-for extensao in EXTENSOES:
-try:
-await bot.load_extension(extensao)
-print(f"📦 Módulo carregado: {extensao}")
-except Exception as erro:
-print(f"❌ Erro carregando {extensao}: {erro}")
-traceback.print_exc()
+async def carregar(): await import("asyncio").gather(*(bot.load_extension(x) for x in EXTENSOES))
 
 @bot.event
 async def on_ready(): print(f"✅ ONLINE: {bot.user} | ANTI-NUKE + BACKUP DUPLO"); await bot.change_presence(activity=discord.Game(name="🛡️ SYSTEM PROTECTING"))
