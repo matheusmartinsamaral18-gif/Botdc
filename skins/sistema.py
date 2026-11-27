@@ -1,5 +1,6 @@
+
 """Sistema de solicitacao de skins para o mapa CONEXAO (THEUSSYT).
-Extensao discord.py: adicione 'skins.sistema' em EXTENSOES no main.py.
+Solicitacoes em threads privadas dentro do canal do painel.
 """
 
 import discord
@@ -8,7 +9,6 @@ from discord.ext import commands
 from config import bot
 
 SITE_IDS = "https://ff-item.netlify.app/"
-CATEGORY_NAME = "SOLICITAÇÕES • CONEXÃO"
 
 
 def is_staff(member: discord.Member) -> bool:
@@ -17,25 +17,7 @@ def is_staff(member: discord.Member) -> bool:
         member.guild.owner_id == member.id
         or p.administrator
         or p.manage_channels
-    )
-
-
-async def get_or_create_category(guild: discord.Guild) -> discord.CategoryChannel:
-    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-
-    if category:
-        return category
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(
-            view_channel=False
-        ),
-    }
-
-    return await guild.create_category(
-        CATEGORY_NAME,
-        overwrites=overwrites,
-        reason="Categoria do sistema de solicitacoes de skins",
+        or p.manage_threads
     )
 
 
@@ -43,140 +25,95 @@ class SkinDetailsModal(discord.ui.Modal, title="Solicitação de skins • CONEX
 
     details = discord.ui.TextInput(
         label="Nome e IDs das peças",
-        placeholder="Informe categoria, famoso e nomes/IDs das peças.",
+        placeholder="Informe o famoso e os nomes/IDs de cada peça.",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=1900,
     )
 
-    def __init__(self, category_name: str):
+    def __init__(self, category_name: str, parent_channel):
         super().__init__()
         self.category_name = category_name
-
-        # Placeholder limitado a menos de 100 caracteres.
-        self.details.placeholder = (
-            "Informe categoria, famoso e nomes/IDs das peças."
-        )
+        self.parent_channel = parent_channel
 
     async def on_submit(self, interaction: discord.Interaction):
 
-        if not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message(
-                "Não consegui identificar suas permissões no servidor.",
-                ephemeral=True,
-            )
-
         guild = interaction.guild
+        user = interaction.user
 
-        if guild is None:
+        if guild is None or not isinstance(user, discord.Member):
             return await interaction.response.send_message(
-                "Este formulário só funciona no servidor.",
+                "Não foi possível identificar o servidor ou usuário.",
                 ephemeral=True,
             )
 
-        category = await get_or_create_category(guild)
+        parent = self.parent_channel
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=False
-            ),
-            interaction.user: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True,
-            ),
-        }
-
-        # Permite acesso a membros da equipe.
-        for member in guild.members:
-            if is_staff(member):
-                overwrites[member] = discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    manage_channels=True,
-                )
-
-        base = (
-            discord.utils.escape_mentions(
-                interaction.user.display_name.lower().replace(" ", "-")[:40]
+        if not isinstance(parent, discord.TextChannel):
+            return await interaction.response.send_message(
+                "O canal do painel não é compatível com solicitações.",
+                ephemeral=True,
             )
-            or "usuario"
-        )
 
-        channel_name = f"skin-{base}"
-
-        existing = discord.utils.get(
-            category.channels,
-            name=channel_name,
-        )
-
-        if existing and interaction.user in existing.members:
-            channel = existing
-
-        else:
-            channel = await guild.create_text_channel(
-                channel_name,
-                category=category,
-                overwrites=overwrites,
-                topic=(
-                    f"Solicitação de skins de {interaction.user} "
-                    "| mapa CONEXÃO | THEUSSYT"
-                ),
+        try:
+            # Cria uma THREAD PRIVADA dentro do canal do painel.
+            thread = await parent.create_thread(
+                name=f"skin-{user.display_name[:70]}",
+                type=discord.ChannelType.private_thread,
+                invitable=False,
                 reason="Nova solicitação de skins",
             )
 
-        embed = discord.Embed(
-            title="📨 NOVA SOLICITAÇÃO DE SKINS",
-            color=0x2ECC71,
-        )
+            # Adiciona o solicitante à thread.
+            await thread.add_user(user)
 
-        embed.add_field(
-            name="Solicitante",
-            value=f"{interaction.user.mention} (`{interaction.user.id}`)",
-            inline=False,
-        )
+            embed = discord.Embed(
+                title="📨 NOVA SOLICITAÇÃO DE SKINS",
+                color=0x2ECC71,
+                description=(
+                    f"**Solicitante:** {user.mention}\n"
+                    f"**ID:** `{user.id}`\n"
+                    f"**Mapa:** CONEXÃO • THEUSSYT\n"
+                    f"**Categoria:** {self.category_name}\n\n"
+                    f"**Detalhes / IDs das peças:**\n"
+                    f"{discord.utils.escape_mentions(self.details.value)}"
+                ),
+            )
 
-        embed.add_field(
-            name="Mapa",
-            value="CONEXÃO • Dono: THEUSSYT",
-            inline=False,
-        )
+            embed.set_footer(text="Status: Pendente de análise")
 
-        embed.add_field(
-            name="Categoria",
-            value=self.category_name,
-            inline=True,
-        )
+            await thread.send(
+                embed=embed,
+                view=StaffActionsView(),
+            )
 
-        embed.add_field(
-            name="Detalhes / IDs",
-            value=discord.utils.escape_mentions(self.details.value),
-            inline=False,
-        )
+            await interaction.response.send_message(
+                f"✅ Solicitação criada: {thread.mention}",
+                ephemeral=True,
+            )
 
-        embed.set_footer(text="Status: Pendente de análise")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Não tenho permissões para criar ou acessar "
+                "threads privadas neste canal.",
+                ephemeral=True,
+            )
 
-        await channel.send(
-            embed=embed,
-            view=StaffActionsView(),
-        )
+        except Exception as erro:
+            print(f"Erro criando solicitação de skins: {erro}")
 
-        await interaction.response.send_message(
-            f"Sua solicitação foi enviada em {channel.mention}.",
-            ephemeral=True,
-        )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Ocorreu um erro ao criar sua solicitação.",
+                    ephemeral=True,
+                )
 
 
 class CategorySelect(discord.ui.Select):
 
-    def __init__(self):
+    def __init__(self, parent_channel):
+
+        self.parent_channel = parent_channel
 
         options = [
             discord.SelectOption(
@@ -213,17 +150,21 @@ class CategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+
         await interaction.response.send_modal(
-            SkinDetailsModal(self.values[0])
+            SkinDetailsModal(
+                self.values[0],
+                self.parent_channel,
+            )
         )
 
 
 class RequestView(discord.ui.View):
 
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self, parent_channel):
+        super().__init__(timeout=180)
 
-        self.add_item(CategorySelect())
+        self.add_item(CategorySelect(parent_channel))
 
         self.add_item(
             discord.ui.Button(
@@ -260,11 +201,8 @@ class StaffActionsView(discord.ui.View):
         emoji="🕐",
         custom_id="skins:analysis",
     )
-    async def analysis(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
+    async def analysis(self, interaction, button):
+
         if not await self.staff_check(interaction):
             return
 
@@ -278,11 +216,8 @@ class StaffActionsView(discord.ui.View):
         emoji="✅",
         custom_id="skins:approve",
     )
-    async def approve(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
+    async def approve(self, interaction, button):
+
         if not await self.staff_check(interaction):
             return
 
@@ -296,11 +231,8 @@ class StaffActionsView(discord.ui.View):
         emoji="❌",
         custom_id="skins:reject",
     )
-    async def reject(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
+    async def reject(self, interaction, button):
+
         if not await self.staff_check(interaction):
             return
 
@@ -309,25 +241,31 @@ class StaffActionsView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Fechar canal",
+        label="Fechar solicitação",
         style=discord.ButtonStyle.secondary,
         emoji="🔒",
         custom_id="skins:close",
     )
-    async def close(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
+    async def close(self, interaction, button):
+
         if not await self.staff_check(interaction):
             return
 
+        thread = interaction.channel
+
+        if not isinstance(thread, discord.Thread):
+            return await interaction.response.send_message(
+                "Este botão só funciona dentro da thread da solicitação.",
+                ephemeral=True,
+            )
+
         await interaction.response.send_message(
-            "Canal será excluído em 5 segundos."
+            "🔒 Solicitação encerrada. A thread será arquivada."
         )
 
-        await interaction.channel.delete(
-            delay=5,
+        await thread.edit(
+            archived=True,
+            locked=True,
             reason=f"Solicitação fechada por {interaction.user}",
         )
 
@@ -343,20 +281,22 @@ class SkinPanelView(discord.ui.View):
         style=discord.ButtonStyle.success,
         custom_id="skins:request",
     )
-    async def request(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
+    async def request(self, interaction, button):
+
+        if not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "Este painel precisa estar em um canal de texto.",
+                ephemeral=True,
+            )
 
         embed = discord.Embed(
             title="🎨 Solicitação de skins • CONEXÃO",
             description=(
-                "Selecione a categoria no menu abaixo. "
-                "Depois, preencha os nomes e IDs das peças.\n\n"
-                f"🌐 **[Consultar IDs das skins]({SITE_IDS})**\n"
-                "Se não souber algum ID, abra o site, "
-                "pesquise e volte aqui para preencher.\n\n"
+                "Selecione a categoria no menu abaixo.\n"
+                "Depois, preencha o nome e os IDs das peças.\n\n"
+                f"🌐 **[Consultar IDs das skins]({SITE_IDS})**\n\n"
+                "A solicitação será criada em uma thread privada "
+                "dentro deste canal.\n\n"
                 "Mapa: **CONEXÃO** | Dono: **THEUSSYT**"
             ),
             color=0x2ECC71,
@@ -364,7 +304,7 @@ class SkinPanelView(discord.ui.View):
 
         await interaction.response.send_message(
             embed=embed,
-            view=RequestView(),
+            view=RequestView(interaction.channel),
             ephemeral=True,
         )
 
@@ -380,10 +320,11 @@ async def painel_skins(ctx, canal: discord.TextChannel):
         description=(
             "Quer sugerir skins para o mapa **CONEXÃO**, "
             "do **THEUSSYT**?\n\n"
-            "Clique no botão abaixo e preencha sua solicitação. "
-            "Ela será enviada em um canal privado, visível para você "
-            "e para a equipe.\n\n"
-            "🌐 Você poderá consultar os IDs no site durante o preenchimento."
+            "Clique no botão abaixo e preencha sua solicitação.\n"
+            "Ela será criada em uma **thread privada** "
+            "dentro deste canal.\n\n"
+            "🌐 Você poderá consultar os IDs das peças durante "
+            "o preenchimento."
         ),
         color=0x2ECC71,
     )
