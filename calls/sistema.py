@@ -1,11 +1,11 @@
-
 """
 SISTEMA DE CALLS TEMPORÁRIAS
 
 - !painelcall #canal -> envia painel
 - Criação pública ou privada
 - Limite personalizável
-- Nome personalizado
+- Nome personalizado (opcional)
+- Sem nome personalizado: "Call Pública" / "Call Privada"
 - Pessoas autorizadas
 - Gerenciamento privado para o dono
 - Adicionar pessoas a qualquer momento
@@ -45,6 +45,11 @@ ARQUIVO = os.path.join(
     os.path.dirname(__file__),
     "dados_calls.json"
 )
+
+
+def nome_padrao(privada):
+    """Nome usado quando o dono não define um nome personalizado."""
+    return "Call Privada" if privada else "Call Pública"
 
 
 # =====================================================
@@ -466,7 +471,7 @@ class CriarCallView(discord.ui.View):
 
         e.add_field(
             name="✏️ Nome da sala",
-            value=self.nome or f"Call de {self.dono_nome}",
+            value=self.nome or nome_padrao(self.privada),
             inline=False
         )
 
@@ -738,6 +743,19 @@ class GerenciarCallView(discord.ui.View):
             )
 
         dados["privada"] = nova_privacidade
+
+        # Sem nome personalizado: atualiza o nome padrão do canal.
+        if not dados.get("nome"):
+
+            try:
+
+                await canal.edit(
+                    name=f"📞 {nome_padrao(nova_privacidade)}",
+                    reason="Tipo da call alterado pelo dono"
+                )
+
+            except discord.HTTPException:
+                pass
 
         self.cog.salvar()
 
@@ -1075,6 +1093,7 @@ class CallCog(commands.Cog):
             dados.setdefault("ordem", [])
             dados.setdefault("permitidos", [])
             dados.setdefault("vazia_desde", time.time())
+            dados.setdefault("nome", None)
 
     def salvar(self):
 
@@ -1257,10 +1276,11 @@ class CallCog(commands.Cog):
                         )
                     )
 
+        # Nome personalizado, ou "Call Pública" / "Call Privada".
         nome_canal = (
             f"📞 {nome}"
             if nome
-            else f"📞 Call de {dono.display_name}"
+            else f"📞 {nome_padrao(privada)}"
         )
 
         try:
@@ -1282,6 +1302,7 @@ class CallCog(commands.Cog):
             "dono": dono.id,
             "limite": limite,
             "privada": privada,
+            "nome": nome,
 
             "permitidos": list(
                 set([dono.id] + permitidos)
