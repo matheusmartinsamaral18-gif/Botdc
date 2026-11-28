@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands
 import json
@@ -12,6 +11,9 @@ REQUEST_CHANNEL_NAME = "solicitacoes-skins"
 DATA_FILE = Path(__file__).with_name("skins_requests.json")
 
 MAX_WEAPONS = 10
+
+# Categorias que NÃO pedem nome.
+CATEGORIES_WITHOUT_NAME = ("Skin normal",)
 
 
 # =========================================================
@@ -387,6 +389,9 @@ class SkinFormView(discord.ui.View):
         self.panel_channel = panel_channel
         self.message = None
 
+        # Skin normal não pede nome.
+        self.uses_name = category not in CATEGORIES_WITHOUT_NAME
+
         self.values = {
             "name": "",
             "head": "",
@@ -420,9 +425,11 @@ class SkinFormView(discord.ui.View):
 
             self.weapon_button = None
 
-            self.add_item(
-                SkinFieldButton(self, "name", 0)
-            )
+            # Só adiciona o botão de nome se a categoria usa nome.
+            if self.uses_name:
+                self.add_item(
+                    SkinFieldButton(self, "name", 0)
+                )
 
             field_keys = list(SKIN_FIELDS.keys())
 
@@ -492,7 +499,7 @@ class SkinFormView(discord.ui.View):
 
         else:
 
-            if self.values["name"]:
+            if self.uses_name and self.values["name"]:
                 embed.add_field(
                     name=category_name_label(self.category),
                     value=discord.utils.escape_mentions(
@@ -567,10 +574,29 @@ class SkinFormView(discord.ui.View):
                 self.panel_channel,
             )
 
+            requester = interaction.user
+
             embed = discord.Embed(
                 title="📨 NOVA SOLICITAÇÃO • THEUSSYT",
                 description="Uma nova sugestão foi enviada.",
                 color=0x2ECC71,
+            )
+
+            # Mostra quem fez a solicitação.
+            embed.set_author(
+                name=f"{requester.display_name} ({requester})",
+                icon_url=requester.display_avatar.url,
+            )
+
+            embed.add_field(
+                name="🙋 Solicitante",
+                value=(
+                    f"{requester.mention}\n"
+                    f"**Nome:** "
+                    f"{discord.utils.escape_markdown(requester.display_name)}\n"
+                    f"**ID:** `{requester.id}`"
+                ),
+                inline=False,
             )
 
             embed.add_field(
@@ -611,14 +637,16 @@ class SkinFormView(discord.ui.View):
 
             else:
 
-                character = self.values.get("name", "")
+                if self.uses_name:
 
-                if character:
-                    embed.add_field(
-                        name=category_name_label(self.category),
-                        value=discord.utils.escape_mentions(character),
-                        inline=False,
-                    )
+                    character = self.values.get("name", "")
+
+                    if character:
+                        embed.add_field(
+                            name=category_name_label(self.category),
+                            value=discord.utils.escape_mentions(character),
+                            inline=False,
+                        )
 
                 for key, (label, _) in SKIN_FIELDS.items():
 
@@ -638,12 +666,14 @@ class SkinFormView(discord.ui.View):
             message = await destination.send(
                 embed=embed,
                 view=StaffActionsView(),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
 
             data = load_requests()
 
             data[str(message.id)] = {
-                "requester_id": interaction.user.id,
+                "requester_id": requester.id,
+                "requester_name": requester.display_name,
                 "status": "pending",
                 "category": self.category,
                 "character": character,
@@ -1025,7 +1055,7 @@ class CategorySelect(discord.ui.Select):
             ),
             discord.SelectOption(
                 label="Skin normal",
-                description="Nome da skin ou IDs das peças",
+                description="IDs das peças",
                 value="Skin normal",
                 emoji="👤",
             ),
